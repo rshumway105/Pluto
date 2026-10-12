@@ -1,6 +1,6 @@
 ---
 title: LLM model interface (Pluto MCP server) — plan
-status: draft
+status: current
 created: 2026-10-12
 ---
 
@@ -350,3 +350,11 @@ Verified (`Test-PlutoMcp.ps1 -Isolated -SelfTest -Run -Viewer -Edit -Tables -Mod
 server): on the beam, joint 3 Z and a new pattern edited in Excel → dry run lists them, the model unchanged → applied
 into r001, clean import, Z = 0.25 and PT2 in the model → after a run, an import into r002 → a bad DesignType comes
 back as SAP2000's warning with the row flagged not as sent, tables still read; group-filtered export.
+
+## Phase 5 status (2026-10-12)
+
+Usage note written: [[vault/arms/pluto-mcp|pluto-mcp]] (start, Claude Desktop / Claude Code setup, environment variables,
+the tool capability table by group with the controller class behind each, work dir and checkpoint rule, the Excel round
+trip, isolation and tests, known limits), with its line in [[vault/arms/Arms map|Arms map]]. The Copilot item is dropped:
+Microsoft 365 Copilot cannot start a local stdio server and VS Code Copilot is not a target (`.vscode/mcp.json` stays).
+The client in use is Claude Desktop. Phases 0–5 are done; what remains is the untested list in the usage note.
