@@ -77,6 +77,48 @@ public static class Json
         object v;
         return d != null && d.TryGetValue(key, out v) && v is bool ? (bool)v : fallback;
     }
+
+    // Tool arguments: a wrong type is the caller's mistake, reported as a ToolError.
+    public static double? Num(Dictionary<string, object> d, string key)
+    {
+        object v;
+        if (d == null || !d.TryGetValue(key, out v) || v == null) return null;
+        double x;
+        if (v is string && double.TryParse((string)v, NumberStyles.Float, Inv, out x)) return x;
+        if (v is int || v is long || v is double || v is decimal) return Convert.ToDouble(v, Inv);
+        throw new ToolError(key + " must be a number");
+    }
+
+    public static int Int(Dictionary<string, object> d, string key, int fallback)
+    {
+        double? v = Num(d, key);
+        return v == null ? fallback : (int)Math.Round(v.Value);
+    }
+
+    public static double[] Nums(Dictionary<string, object> d, string key)
+    {
+        object v;
+        if (d == null || !d.TryGetValue(key, out v) || v == null) return null;
+        object[] a = v as object[];
+        if (a == null) throw new ToolError(key + " must be an array of numbers");
+        double[] r = new double[a.Length];
+        for (int i = 0; i < a.Length; i++)
+        {
+            if (!(a[i] is int || a[i] is long || a[i] is double || a[i] is decimal)) throw new ToolError(key + " must be an array of numbers");
+            r[i] = Convert.ToDouble(a[i], Inv);
+        }
+        return r;
+    }
+
+    // A string array (a single string counts as one).
+    public static string[] Strs(Dictionary<string, object> d, string key)
+    {
+        object v;
+        if (d == null || !d.TryGetValue(key, out v) || v == null) return null;
+        object[] a = v as object[];
+        if (a == null) return new string[] { Convert.ToString(v, Inv) };
+        return Array.ConvertAll(a, delegate(object o) { return Convert.ToString(o, Inv); });
+    }
 }
 
 // ---------------------------------------------------------------- log (stderr + file; never stdout)

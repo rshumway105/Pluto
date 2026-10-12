@@ -11,6 +11,8 @@
 #            -RunIfNeeded: only when a case has no results (alone: on the held file; with -RunOnCopy: on the copy)
 #   tables   -Tables "<name>;<name>" -TablesOut <s2k>: input tables read back (display precision), to echo
 #            what an import produced
+#   describe -Describe <json>: SapRead.Describe, the model overview the MCP server's describe_model gives
+#            (units, counts, extent, supports, properties with use counts, groups, patterns, cases, combos)
 #   results  -Results <s2k>: result tables at full precision, objects under their SAP names
 #   export   -Export <base> (or an existing folder: <folder>\<model name>): analysis mesh -> <base>.model.s2k + <base>.labels.csv, results ->
 #            <base>.results.s2k (-NoResults: geometry only; -FinalOnly: staged cases' last step only),
@@ -31,6 +33,7 @@ param(
     [switch]$RunIfNeeded,
     [string]$Tables,
     [string]$TablesOut,
+    [string]$Describe,
     [string]$Results,
     [string]$Export,
     [switch]$NoResults,
@@ -92,6 +95,12 @@ try {
         if (-not $TablesOut) { throw "-Tables needs -TablesOut <s2k>." }
         $counts = $sap.WriteTablesS2k((Full $TablesOut), ($Tables -split ";"))
         Say "tables" ("{0}  ({1})" -f $TablesOut, (($counts.Keys | ForEach-Object { "$_ $($counts[$_])" }) -join ", "))
+    }
+    if ($Describe) {
+        $d = (New-Object SapRead $sap).Describe(0)
+        [IO.File]::WriteAllText((Full $Describe), (ConvertTo-Json $d -Depth 8), (New-Object Text.UTF8Encoding $false))
+        Say "describe" ("{0}  ({1:0.0}s index)" -f $Describe, $d["indexSeconds"])
+        $out.describe = Full $Describe
     }
     if ($Results) {
         $counts = $sap.WriteResultsS2k((Full $Results), $null, [bool]$FinalOnly, "Run-Sap.ps1")

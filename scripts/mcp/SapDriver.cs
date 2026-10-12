@@ -36,10 +36,19 @@ public sealed class SapDriver : IModelDriver
         return Json.O(
             "status", true,
             "self_test", true,
-            "select_in_gui", "planned (phase 1): the OAPI selects by group, property, coordinate range, plane",
+            "open_model", true,
+            "describe_model", true,
+            "list_objects", true,
+            "get_object", true,
+            "get_sections", true,
+            "get_materials", true,
+            "get_load_cases", true,
+            "get_combos", true,
+            "select_objects", true,
+            "select_in_gui", "select_objects show_in_sap: GUI selection only, the model is not changed",
+            "describe_levels", "from joint Z clusters, grid Z lines and level-named groups (SAP2000 has no stories)",
+            "read_table", HasTables() ? (object)true : "not available: this SAP2000 API has no DatabaseTables",
             "gui_display_control", "not available: the OAPI only refreshes the view; results are shown in the Pluto viewer (phase 4)",
-            "open_model", "planned (phase 1)",
-            "describe_model", "planned (phase 1)",
             "run_analysis", "planned (phase 2)",
             "query_results", "planned (phase 2)",
             "edit_model", "planned (phase 3)");
@@ -98,6 +107,69 @@ public sealed class SapDriver : IModelDriver
                 cases.Add(Json.O("name", kv.Key, "status", kv.Value >= 1 && kv.Value <= 4 ? CaseStates[kv.Value] : kv.Value.ToString(Json.Inv)));
             r["loadCases"] = cases;
             r["groups"] = s.Groups();
+            return r;
+        });
+    }
+
+    bool? hasTables;
+    bool HasTables()
+    {
+        if (hasTables == null) hasTables = typeof(SAP2000v1.cSapModel).GetProperty("DatabaseTables") != null;
+        return hasTables.Value;
+    }
+
+    // ---------------------------------------------------------------- read (phase 1)
+
+    SapRead reader; SapSession readerFor;
+
+    // A read on the model SAP holds, on the STA thread. Reads never change the model.
+    public T Read<T>(string what, Func<SapRead, T> fn)
+    {
+        return sta.Invoke(what, ReadTimeout, delegate
+        {
+            SapSession s = Attached();
+            if (string.IsNullOrEmpty(s.ModelPath())) throw new ToolError("SAP2000 holds no model: open one with open_model");
+            if (reader == null || readerFor != s) { reader = new SapRead(s); readerFor = s; }
+            return fn(reader);
+        });
+    }
+
+    static readonly TimeSpan ReadTimeout = TimeSpan.FromMinutes(5);
+
+    // Opens path in the attached SAP2000 (replacing what it holds) and at once saves it as the working copy
+    // <session dir>\r000.sdb, so every later save, run or edit writes the copy and never the original (plan § 3).
+    // A .s2k is imported first; SAP imports nothing from a file stamped with a newer major version than its own.
+    public Dictionary<string, object> OpenModel(string path, string sessionDir)
+    {
+        return sta.Invoke("open_model", Long, delegate
+        {
+            if (!File.Exists(path)) throw new ToolError("no such file: " + path);
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext != ".sdb" && ext != ".s2k" && ext != ".$2k") throw new ToolError("open_model takes a .sdb, .s2k or .$2k file (got '" + ext + "')");
+            SapSession s = Attached();
+            string before = s.ModelPath();
+            Stopwatch sw = Stopwatch.StartNew();
+            s.Open(path, false);
+            Directory.CreateDirectory(sessionDir);
+            string copy = Path.Combine(sessionDir, "r000.sdb");
+            s.SaveAs(copy);
+            reader = null;
+            int[] c = s.Counts();
+            File.WriteAllText(Path.Combine(sessionDir, "session.json"), Json.Write(Json.O(
+                "original", path, "originalBytes", new FileInfo(path).Length,
+                "originalModifiedUtc", File.GetLastWriteTimeUtc(path).ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv),
+                "openedUtc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv),
+                "sapVersion", s.Version(), "workingCopy", copy)));
+            log.Info("open_model " + path + " -> " + copy);
+            Dictionary<string, object> r = Json.O(
+                "original", path, "workingCopy", s.ModelPath(), "sessionDir", sessionDir,
+                "replaced", string.IsNullOrEmpty(before) ? null : before,
+                "units", s.Units(),
+                "objects", Json.O("joints", c[0], "areas", c[1], "frames", c[2], "links", c[3]),
+                "seconds", Math.Round(sw.Elapsed.TotalSeconds, 1),
+                "note", "SAP2000 now holds the working copy; the original file is never written. Next: describe_model.");
+            if (c[0] == 0 && ext != ".sdb")
+                r["warning"] = "the import produced no joints: check the file's PROGRAM CONTROL Version (SAP2000 imports nothing from a newer major version) and SAP2000's import log";
             return r;
         });
     }

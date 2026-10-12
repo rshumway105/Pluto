@@ -203,3 +203,38 @@ cannot find a normal SAP2000 (`MK_E_UNAVAILABLE`); from a normal process the unc
 
 **For ETABS:** the running SAP 26 instance answers both `SAP2000v1.cOAPI` and `CSiAPIv1.cOAPI` (`CSiAPIv1.dll`, CSI's
 shared API, shipped with SAP 26). The ETABS driver should be checked against `CSiAPIv1` first: possibly one driver.
+
+## Phase 1 status (2026-10-12)
+
+Built and tested on the development machine (SAP2000 26.3.0), server 0.2.0. The read code is controller code:
+`scripts/sap/SapRead.cs` (on a `SapSession`, so `Run-Sap.ps1 -Describe <json>` uses it too); the server adds
+argument checks, paging and files in `Tools.cs` and the working copy in `SapDriver.OpenModel`.
+
+| tool | notes |
+|---|---|
+| `open_model(path)` | `.sdb`, or `.s2k` / `.$2k` imported; saved at once as `<work>\models\<model>\<yyyyMMdd-HHmmss>\r000.sdb` with `session.json` (original path, size, time). A session folder per open, so earlier checkpoints survive a reopen. Warns when an import yields no joints (version stamp). |
+| `describe_model` | as planned, plus extent, supports by restraint pattern, constraints, coordinate systems; lists capped (`max_rows`) with `<list>Total` |
+| `list_objects`, `get_object` | paged; `get_object` adds connected objects (joints), insertion point, end offsets, modifiers and loads (joint force / ground displacement, frame distributed / point, area uniform / surface pressure / gravity) |
+| `get_sections`, `get_materials`, `get_load_cases`, `get_combos` | wildcard names; frame dimensions for I, box, pipe, rectangle, circle, angle, channel (others: `read_table`); case loads and initial case for linear / nonlinear static |
+| `select_objects` | kind, Z range, box, plane, section, group, saved selection, name; `match` all / any / centroid; default tolerance 0.1 % of the largest extent. `save_as` → `<work>\selections\<name>.json` (not yet a viewer sidecar group: that needs the export, phase 2/4). `show_in_sap`: a group alone goes through `SelectObj.Group`; otherwise per object, capped at 2000 (~30 ms each) |
+| `describe_levels` | Z clusters with horizontal frame / area counts (floor-like at ≥ max(3, 2 %) of them), grid Z lines (`Grid Lines` table), level-named groups with Z range |
+| `read_table` | no name: tables holding data (`GetAllTables`, not empty); name: rows, `group`, `filter` (wildcards), `fields`, paging, `to_file` (TSV in `<work>\tables`) |
+
+The object index (every joint's coordinates, frame / area / link connectivity and property) is cached per
+(model path, counts, units). **Phase 3 edit tools must call `SapRead.Invalidate()`**: an edit that keeps the
+counts would not be seen otherwise.
+
+Verified: `Test-PlutoMcp.ps1 -Model <file>` (every phase 1 tool, consistency checks: counts agree across tools,
+section use sums to the frames, below + above − on a plane = all joints, saved selection round trip, table rows
+= joints, filter + file) passes on the example tank (1371 joints, 1152 areas, 72 frames, 253 links); `-SelfTest`
+still passes; PS 5.1 `Add-Type` compile of `scripts/sap` and `Config.ps1` clean; `Run-Sap.ps1 -Describe` works.
+
+Clients: Claude Desktop connects and lists the tools (an `mcpServers.pluto` entry with the absolute path to
+`Start-PlutoMcp.ps1`; the Store install keeps `claude_desktop_config.json` under
+`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`, and the app reads it only on a full quit and restart).
+Microsoft 365 Copilot cannot start a local stdio server, so it is out; VS Code Copilot agent mode is configured but
+dropped as a target.
+
+Not yet tried: a large model (index time; seconds per 10k objects expected from 0.4 s for 2.8k), a model with
+combos and frame sections of every type, and the tools from Claude Code itself (this session's client was not
+started in the repo, so `.mcp.json` was not loaded; the protocol test drove the server).

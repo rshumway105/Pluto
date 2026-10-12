@@ -194,7 +194,10 @@ public class SapSession
 
     // Rows of a DatabaseTables input table (rounded to the display format: input tables only, never
     // results). Empty tables come back with null field names (stale buffers), hence the guard.
-    public List<Dictionary<string, string>> TableRows(string table)
+    public List<Dictionary<string, string>> TableRows(string table) { return TableRows(table, ""); }
+
+    // group: only the rows of that group's objects ("" = all).
+    public List<Dictionary<string, string>> TableRows(string table, string group)
     {
         List<Dictionary<string, string>> rows = new List<Dictionary<string, string>>();
         object db = DbTables();
@@ -202,7 +205,7 @@ public class SapSession
         Type it = typeof(cSapModel).Assembly.GetType("SAP2000v1.cDatabaseTables");
         System.Reflection.MethodInfo mi = it == null ? null : it.GetMethod("GetTableForDisplayArray");
         if (mi == null) return rows;
-        object[] a = { table, new string[0], "", 0, null, 0, null };
+        object[] a = { table, new string[0], group ?? "", 0, null, 0, null };
         if ((int)mi.Invoke(db, a) != 0) return rows;
         string[] fields = (string[])a[4], data = (string[])a[6]; int nrec = (int)a[5];
         if (nrec == 0 || fields == null || fields.Length == 0) return rows;
@@ -215,6 +218,24 @@ public class SapSession
             rows.Add(d);
         }
         return rows;
+    }
+
+    // Input tables that hold data in this model, as { key, name } (GetAllTables, IsEmpty false); null without
+    // DatabaseTables.
+    public List<string[]> AvailableTables()
+    {
+        object db = DbTables();
+        if (db == null) return null;
+        Type it = typeof(cSapModel).Assembly.GetType("SAP2000v1.cDatabaseTables");
+        System.Reflection.MethodInfo mi = it == null ? null : it.GetMethod("GetAllTables");
+        if (mi == null) return null;
+        object[] a = { 0, null, null, null, null };
+        List<string[]> r = new List<string[]>();
+        if ((int)mi.Invoke(db, a) != 0) return r;
+        string[] keys = (string[])a[1], names = (string[])a[2]; bool[] empty = (bool[])a[4];
+        for (int i = 0; keys != null && i < keys.Length; i++)
+            if (empty == null || !empty[i]) r.Add(new string[] { keys[i], names != null && i < names.Length ? names[i] : keys[i] });
+        return r;
     }
 
     // Input tables read back as .s2k text (display-rounded: for echoing what an import produced, e.g.
