@@ -2,7 +2,8 @@
 # including every Python tool (pythonTools\sap\sap_cli.py calls this script; Python never touches the OAPI).
 # Windows PowerShell 5.1. Steps run in this order, each only when its switch is given:
 #
-#   attach   the running SAP2000, or start one (-NewInstance: always a second SAP, closed at the end
+#   attach   the running SAP2000, or start one (-NewInstance: always a second SAP, closed at the end;
+#            -AttachPid <pid>: that SAP2000 process, e.g. the MCP server's own instance
 #            unless -KeepOpen; a SAP this script started is closed at the end unless -KeepOpen)
 #   open     -Open <.s2k|.sdb>: OpenFile; an imported .s2k is saved beside it as .sdb (-NoSaveSdb: not)
 #   axes     -AreaAxes <tsv>: local 1 of every area object, global direction cosines
@@ -26,6 +27,7 @@ param(
     [string]$Open,
     [switch]$NoSaveSdb,
     [switch]$NewInstance,
+    [int]$AttachPid,
     [switch]$KeepOpen,
     [string]$AreaAxes,
     [switch]$Run,
@@ -46,11 +48,15 @@ param(
 )
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "Import-SapApi.ps1")
+# The viewer lib (SapToPluto) compiles before SAP2000 is touched: once SAP's cHelper has run (-AttachPid, -NewInstance)
+# its .NET Standard assemblies are loaded and the lib's Add-Type cannot load System.Console (2026-10-12).
+if ($Export -and -not $NoViewerFile) { . (Join-Path (Split-Path $PSScriptRoot) "lib\Config.ps1") }
 $out = [ordered]@{}
 function Say([string]$step, [string]$text) { Write-Output ("[{0}] {1}" -f $step.PadRight(7), $text) }
 function Full([string]$p) { [IO.Path]::GetFullPath($p) }
 
-if ($NewInstance) { $sap = [SapSession]::NewInstance($SapExe) } else { $sap = [SapSession]::AttachOrStart($SapExe, $false) }
+if ($AttachPid) { $sap = [SapSession]::AttachProcess($AttachPid) }
+elseif ($NewInstance) { $sap = [SapSession]::NewInstance($SapExe) } else { $sap = [SapSession]::AttachOrStart($SapExe, $false) }
 $out.version = $sap.Version()
 $out.started = $sap.Started
 Say "sap" ("SAP2000 {0} ({1})" -f $out.version, $(if ($sap.Started) { "started $SapExe" } else { "attached to the running instance" }))
@@ -122,7 +128,6 @@ try {
         $out.model = $modelS2k; $out.resultsS2k = $resS2k
         if (-not $NoViewerFile) {
             if (-not $ModelId) { $ModelId = "sap/" + ([IO.Path]::GetFileNameWithoutExtension($held) -replace ' ', '_') }
-            . (Join-Path (Split-Path $PSScriptRoot) "lib\Config.ps1")
             $r = [SapToPluto]::Export($modelS2k, $resS2k, $base, $ModelId, [bool]$Cylindrical)
             foreach ($line in ($r.Summary() -split "`r?`n")) { if ($line.Trim()) { Say "export" $line } }
             $out.bin = "$base.bin"; $out.features = "$base.features.json"

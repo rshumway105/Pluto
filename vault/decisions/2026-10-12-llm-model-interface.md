@@ -324,3 +324,29 @@ connects, loads r002 over Range, shows HYDRO / F11, highlights and isolates the 
 its state, and reloads r003 after the next run. Not yet tried: a user's click read back through
 `viewer_get_selection` (the pinned readout path), a multi-GB `.bin`, the node tests (`node` is not installed on this
 machine; `live.js` changes no existing module).
+
+## Tables in Excel (2026-10-12)
+
+What `edit_table` was meant to be, as an Excel round trip (server 0.6.0). `export_tables(tables, group?)` writes one
+workbook (`<session dir>\tables\<checkpoint>-<stamp>.xlsx`, one sheet per table, values as SAP2000's text, a hidden
+`_row` column with each row's index, a very hidden `_pluto` sheet) plus a snapshot `<workbook>.pluto.json` of the
+tables as exported, and opens it in the user's Excel. `import_tables(workbook?)` reads it back (Excel through COM in
+`scripts/mcp/ExcelTables.cs`, invisible, own STA thread), finds changed / added / deleted rows against the snapshot
+(by `_row`, so a group-filtered sheet edits its rows inside the full table), warns when the model's tables changed
+since the export (`force`), and defaults to a dry run. Applied: into a checkpoint like every edit (unlocked), every
+table in one `ApplyEditedTables` (`scripts/sap/SapTables.cs`), the import's warning / error lines and log returned,
+rows read back (`notAsSent` lists rows SAP2000 did not keep; fields left empty are SAP2000's to fill), and whether
+tables still read.
+
+Why it failed before: SAP2000 cannot import edited tables once it has imported a .s2k in the same process (recorded
+in [[vault/arms/sap-controller|sap-controller]]); the earlier failures all came after an `open_model` of a .s2k.
+`open_model` now imports .s2k in a second SAP2000 and opens the saved r000.sdb in the user's.
+
+Also: `PLUTO_SAP_INSTANCE=new` makes the server start its own SAP2000 (closed on exit) and `Test-PlutoMcp.ps1
+-Isolated` uses it, so the tests never touch the user's SAP2000; `Run-Sap.ps1 -AttachPid` lets `export_viewer`
+reach that instance.
+
+Verified (`Test-PlutoMcp.ps1 -Isolated -SelfTest -Run -Viewer -Edit -Tables -Model <tank>`, 273 checks, the whole
+server): on the beam, joint 3 Z and a new pattern edited in Excel → dry run lists them, the model unchanged → applied
+into r001, clean import, Z = 0.25 and PT2 in the model → after a run, an import into r002 → a bad DesignType comes
+back as SAP2000's warning with the row flagged not as sent, tables still read; group-filtered export.

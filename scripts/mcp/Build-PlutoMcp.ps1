@@ -25,7 +25,7 @@ $src = @(Get-ChildItem $PSScriptRoot -Filter *.cs | ForEach-Object FullName) +
        @(Get-ChildItem (Join-Path $PSScriptRoot "..\sap") -Filter "Sap*.cs" | ForEach-Object FullName)
 # netstandard: SAP 26's dll targets it (the Framework ships the facade beside csc.exe)
 $refs = @("/reference:$sapDll", "/reference:$(Join-Path $fw 'netstandard.dll')",
-          "/reference:System.dll", "/reference:System.Core.dll", "/reference:System.Web.Extensions.dll")
+          "/reference:System.dll", "/reference:System.Core.dll", "/reference:System.Web.Extensions.dll", "/reference:Microsoft.CSharp.dll")
 # A client still running the old exe (Claude Desktop, a second Claude Code) locks it against writing but not
 # against renaming: move it aside, and delete the moved copies no process holds any more.
 Get-ChildItem $bin -Filter "PlutoMcp.*.old" | ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }

@@ -83,6 +83,9 @@ public class SapRead
 
     public string ModelPath() { return s.ModelPath(); }
 
+    // Input tables for editing (export_tables reads them here).
+    public SapTables Tables() { return new SapTables(s); }
+
     // Largest side of the joints' bounding box (0 without joints): the scale for default tolerances.
     public double LargestExtent()
     {

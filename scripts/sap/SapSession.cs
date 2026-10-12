@@ -29,6 +29,7 @@ public class SapSession
     public cOAPI Sap;
     public cSapModel Model;
     public bool Started;                      // true = this process launched SAP (Close exits it)
+    public int ProcessId;                     // the SAP2000 process when this session started it (else 0)
     public double OpenSeconds;
     public List<string> Warnings = new List<string>();
 
@@ -50,6 +51,17 @@ public class SapSession
         return s;
     }
 
+    // Attach to one SAP2000 process (GetActiveObject only finds the first registered one).
+    public static SapSession AttachProcess(int pid)
+    {
+        SapSession s = new SapSession();
+        cHelper helper = new Helper();
+        s.Sap = helper.GetObjectProcess(ProgId, pid);
+        if (s.Sap == null) throw new Exception("no SAP2000 API object in process " + pid);
+        s.Model = s.Sap.SapModel;
+        return s;
+    }
+
     protected void Attach(string exePath, bool attachOnly)
     {
         try { Sap = (cOAPI)Marshal.GetActiveObject(ProgId); Model = Sap.SapModel; }
@@ -62,12 +74,15 @@ public class SapSession
 
     protected void Start(string exePath)
     {
+        HashSet<int> before = new HashSet<int>();
+        foreach (Process p in Process.GetProcessesByName("SAP2000")) before.Add(p.Id);
         cHelper helper = new Helper();
         Sap = helper.CreateObject(exePath);
         Check(Sap.ApplicationStart(), "ApplicationStart");
         Sap.Visible();
         Started = true;
         Model = Sap.SapModel;
+        foreach (Process p in Process.GetProcessesByName("SAP2000")) if (!before.Contains(p.Id)) ProcessId = p.Id;
     }
 
     // Exits SAP only if this process started it.

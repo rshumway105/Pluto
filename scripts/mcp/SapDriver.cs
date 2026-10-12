@@ -31,6 +31,9 @@ public sealed class SapDriver : IModelDriver
 
     public string Program { get { return "SAP2000"; } }
 
+    // The SAP2000 process of an own instance (PLUTO_SAP_INSTANCE=new), for child runners (Run-Sap.ps1 -AttachPid); else 0.
+    public int OwnProcessId { get { return OwnInstance && session != null ? session.ProcessId : 0; } }
+
     public Dictionary<string, object> Capabilities()
     {
         return Json.O(
@@ -56,9 +59,13 @@ public sealed class SapDriver : IModelDriver
             "compare_runs", "from the per-object envelopes each run_analysis saves",
             "export_viewer", "SapExport -> SapToPluto through Run-Sap.ps1 -Export: .bin + .features.json",
             "edit_model", "targeted tools (sections, properties, materials, restraints, releases, loads, patterns, cases, combos, groups, joint moves, frames, deletes), each into a checkpoint, logged, with dry_run",
-            "edit_table", "not available: SAP2000 26.3 refuses edited DatabaseTables (Set / ApplyEditedTables return 1, empty log) and then reads no table until restarted",
+            "tables_in_excel", "export_tables -> Excel -> import_tables (dry run first; into a checkpoint, unlocked, one import, its log)",
             "revert", "reopens any checkpoint of the session; list_checkpoints, get_change_log");
     }
+
+    // PLUTO_SAP_INSTANCE=new: the server starts a SAP2000 of its own and closes it on exit (tests that must not touch the
+    // user's SAP2000). Otherwise it attaches to the one the user has open and never starts one.
+    static readonly bool OwnInstance = Environment.GetEnvironmentVariable("PLUTO_SAP_INSTANCE") == "new";
 
     // Attach to the SAP2000 the user has open; never starts one. Reattaches after SAP is closed and reopened.
     SapSession Attached()
@@ -70,8 +77,8 @@ public sealed class SapDriver : IModelDriver
             catch (InvalidComObjectException) { session = null; }
             log.Info("SAP2000 connection lost: reattaching");
         }
-        session = SapSession.AttachOrStart(sapExe, true);
-        log.Info("attached to SAP2000 " + session.Version());
+        session = OwnInstance ? SapSession.NewInstance(sapExe) : SapSession.AttachOrStart(sapExe, true);
+        log.Info((OwnInstance ? "started an own SAP2000 " : "attached to SAP2000 ") + session.Version());
         return session;
     }
 
@@ -386,10 +393,19 @@ public sealed class SapDriver : IModelDriver
             SapSession s = Attached();
             string before = s.ModelPath();
             Stopwatch sw = Stopwatch.StartNew();
-            s.Open(path, false);
             Directory.CreateDirectory(sessionDir);
             string copy = Path.Combine(sessionDir, "r000.sdb");
-            s.SaveAs(copy);
+            if (ext == ".sdb") { s.Open(path, false); s.SaveAs(copy); }
+            else
+            {
+                // Importing a .s2k leaves that SAP2000 unable to import edited tables (ApplyEditedTables fails, then no
+                // table reads) until it restarts (SAP 26.3, 2026-10-12). Import in a second SAP2000, save r000.sdb there,
+                // close it, and open the .sdb here, so the user's SAP2000 never imports a text file.
+                SapSession helper = SapSession.NewInstance(sapExe);
+                try { helper.Open(path, false); helper.SaveAs(copy); }
+                finally { helper.Close(); }
+                s.Open(copy, false);
+            }
             reader = null;
             int[] c = s.Counts();
             WriteSession(sessionDir, path, s.Version(), copy, null);
@@ -456,5 +472,10 @@ public sealed class SapDriver : IModelDriver
             .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
     }
 
-    public void Dispose() { sta.Dispose(); }   // never closes the SAP2000 it attached to
+    // Never closes the SAP2000 it attached to; an own instance (PLUTO_SAP_INSTANCE=new) is closed.
+    public void Dispose()
+    {
+        if (OwnInstance && session != null) { try { sta.Invoke("close", Quick, delegate { session.Close(); return 0; }); } catch (Exception) { } }
+        sta.Dispose();
+    }
 }

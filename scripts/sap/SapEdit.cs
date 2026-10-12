@@ -1,6 +1,6 @@
 // Edits to the model SAP2000 holds, each returning what it changed as before -> after (JSON-ready): sections and
 // properties, materials, restraints, releases, joint / frame / area loads, load patterns, cases and combinations,
-// groups, joint moves, new frames and deletes, through the object API. dryRun: nothing is
+// groups, joint moves, new frames and deletes, through the object API (whole tables: SapTables). dryRun: nothing is
 // applied, the reply says what would change. Used by the Pluto MCP server (scripts\mcp), which decides which file
 // the edit goes into (a checkpoint, never the opened original) and logs it. A locked model (one with results)
 // must be unlocked first; SapSession / the server do that. Values are in the model's present units. C# 5.
@@ -21,6 +21,9 @@ public class SapEdit
     readonly SapRead read;
 
     public SapEdit(SapSession session, SapRead reader) { s = session; read = reader; }
+
+    // Input tables (import_tables applies the edited ones through it).
+    public SapTables Tables() { return new SapTables(s); }
     cSapModel M { get { return s.Model; } }
 
     // ---------------------------------------------------------------- reply
@@ -544,10 +547,8 @@ public class SapEdit
         return e.Reply("delete " + kind + "s", dryRun);
     }
 
-    // No table editing: on SAP2000 26.3 (2026-10-12) DatabaseTables.SetTableForEditingArray and ApplyEditedTables return 1
-    // with an empty import log even for an unchanged round trip, and afterwards GetTableForDisplayArray gives no rows for
-    // any table (also after CancelTableEditing and opening another model) until SAP2000 restarts. An edit_table tool
-    // waits until that is understood; the targeted edits above use the object API.
+    // Whole input tables are edited through SapTables (export_tables / import_tables, the Excel round trip).
+
     // ---------------------------------------------------------------- helpers
 
     static void RequireName(string[] names, string name, string what)

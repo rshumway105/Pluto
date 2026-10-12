@@ -467,6 +467,24 @@ public sealed class ToolSet
         Add("viewer_get_selection", "What the live viewer shows and what the user pinned (clicked): component, load case, the pinned " +
             "value with its element / node (mapped back to the SAP2000 object), and the groups shown. Read only.",
             Schema(), ViewerSelection);
+        // ------------------------------------------------ input tables through Excel
+
+        Add("export_tables", "Exports SAP2000 input tables (read_table lists the keys) to an Excel workbook, one sheet per table, and " +
+            "opens it in Excel for the user to look at and edit (open: false only writes it). group: only that group's rows. " +
+            "Values are text as SAP2000 writes them. After the user saves, import_tables brings the changes back. Read only.",
+            Schema(new[] { "tables" }, "tables", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Table keys, e.g. [\"Frame Section Assignments\", \"Joint Restraint Assignments\"]."),
+                "group", Prop("string", "Only rows of this group's objects."),
+                "open", Prop("boolean", "Open the workbook in Excel (default true).")),
+            ExportTables);
+
+        Add("import_tables", "Brings an exported workbook back into SAP2000 after the user edited it in Excel: per table the changed, " +
+            "added and deleted rows against the export, and a warning when the model changed since. dry_run DEFAULTS TO TRUE: " +
+            "show the changes to the user, then call again with dry_run false. Applied: into a checkpoint (unlocked), all tables " +
+            "in one SAP2000 import, its log returned, rows read back, logged like every edit; revert goes back.",
+            Schema("workbook", Prop("string", "The .xlsx (default: the latest export of the current session)."),
+                "dry_run", Prop("boolean", "Only show the changes (default true)."),
+                "force", Prop("boolean", "Import even though the model's tables changed since the export.")),
+            ImportTables);
     }
 
     object Status(Dictionary<string, object> a)
@@ -798,6 +816,7 @@ public sealed class ToolSet
         if (!wantResults || !hasResults) args.Append(" -NoResults");
         if (finalOnly) args.Append(" -FinalOnly");
         if (cyl) args.Append(" -Cylindrical");
+        if (ctx.Sap.OwnProcessId > 0) args.Append(" -AttachPid " + ctx.Sap.OwnProcessId.ToString(Json.Inv));
 
         System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"), args.ToString());
@@ -833,6 +852,218 @@ public sealed class ToolSet
         if (result == null) reply["warning"] = "Run-Sap.ps1 printed no RESULT line: see the log";
         if (!File.Exists(outBase + ".bin")) reply["warning"] = "no .bin was written: see the log";
         return reply;
+    }
+
+    // ---------------------------------------------------------------- tables in Excel
+
+    ExcelTables excel;
+    ExcelTables Excel() { if (excel == null) excel = new ExcelTables(); return excel; }
+
+    object ExportTables(Dictionary<string, object> a)
+    {
+        string[] keys = Json.Strs(a, "tables");
+        if (keys == null || keys.Length == 0) throw new ToolError("tables is required: table keys (read_table without a name lists them)");
+        string group = Json.Str(a, "group");
+        bool open = Json.Bool(a, "open", true);
+        string model = null, units = null;
+        List<SapTables.Table> full = new List<SapTables.Table>();
+        List<List<int>> exported = new List<List<int>>();
+        ctx.Sap.Read("export_tables", delegate(SapRead r)
+        {
+            model = r.ModelPath(); units = r.Objects().Units;
+            if (group != null && !r.GroupExists(group)) throw new ToolError("no group '" + group + "'");
+            SapTables t = r.Tables();
+            foreach (string k in keys)
+            {
+                SapTables.Table all;
+                try { all = t.Read(k, ""); }
+                catch (ArgumentException e) { throw new ToolError(e.Message); }
+                List<int> ids = new List<int>();
+                if (group == null) for (int i = 0; i < all.Rows.Count; i++) ids.Add(i);
+                else
+                {
+                    // the group's rows, located in the full table (first unused equal row)
+                    SapTables.Table sub = t.Read(k, group);
+                    bool[] taken = new bool[all.Rows.Count];
+                    foreach (string[] row in sub.Rows)
+                        for (int i = 0; i < all.Rows.Count; i++)
+                            if (!taken[i] && SameRow(all.Fields, all.Rows[i], sub.Fields, row)) { taken[i] = true; ids.Add(i); break; }
+                }
+                full.Add(all); exported.Add(ids);
+            }
+            return 0;
+        });
+        string dir = SapDriver.SessionDirOf(model) ?? ctx.WorkDir;
+        string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", Json.Inv);
+        string book = Path.Combine(dir, "tables", Safe(Path.GetFileNameWithoutExtension(model)) + "-" + stamp + ".xlsx");
+        Directory.CreateDirectory(Path.GetDirectoryName(book));
+        string snap = book + ".pluto.json";
+        HashSet<string> used = new HashSet<string>();
+        List<ExcelTables.Sheet> sheets = new List<ExcelTables.Sheet>();
+        List<object> tables = new List<object>();
+        for (int i = 0; i < full.Count; i++)
+        {
+            ExcelTables.Sheet s = new ExcelTables.Sheet();
+            s.Table = full[i].Key; s.Name = ExcelTables.SheetName(full[i].Key, used); s.Fields = full[i].Fields;
+            foreach (int id in exported[i]) { s.Rows.Add(full[i].Rows[id]); s.RowIds.Add(id); }
+            sheets.Add(s);
+            tables.Add(Json.O("table", full[i].Key, "sheet", s.Name, "fields", full[i].Fields, "rows", full[i].Rows, "exported", exported[i]));
+        }
+        File.WriteAllText(snap, Json.Write(Json.O("format", "pluto-tables", "version", 1, "model", model, "units", units, "group", group,
+            "exportedUtc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv), "workbook", book, "tables", tables)));
+        Excel().Write(book, sheets, snap);
+        if (open) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(book) { UseShellExecute = true });
+        List<object> summary = new List<object>();
+        for (int i = 0; i < sheets.Count; i++) summary.Add(Json.O("table", sheets[i].Table, "sheet", sheets[i].Name, "rows", sheets[i].Rows.Count, "fields", sheets[i].Fields.Length));
+        return Json.O("workbook", book, "opened", open, "model", model, "units", units, "group", group, "tables", summary,
+            "note", "Edit and save the workbook in Excel (values are text as SAP2000 writes them; add rows at the bottom, delete " +
+                    "whole rows; keep row 1 and the hidden column A). Then import_tables: a dry run shows the changes first.");
+    }
+
+    object ImportTables(Dictionary<string, object> a)
+    {
+        string book = Json.Str(a, "workbook");
+        bool dry = Json.Bool(a, "dry_run", true), force = Json.Bool(a, "force", false);
+        if (book == null)
+        {
+            string model = ctx.Sap.Read("import_tables", delegate(SapRead r) { return r.ModelPath(); });
+            string tdir = Path.Combine(SapDriver.SessionDirOf(model) ?? ctx.WorkDir, "tables");
+            string[] books = Directory.Exists(tdir) ? Directory.GetFiles(tdir, "*.xlsx") : new string[0];
+            if (books.Length == 0) throw new ToolError("no exported workbook in " + tdir + ": export_tables first, or give workbook");
+            Array.Sort(books, delegate(string x, string y) { return File.GetLastWriteTimeUtc(y).CompareTo(File.GetLastWriteTimeUtc(x)); });
+            book = books[0];
+        }
+        if (!File.Exists(book)) throw new ToolError("no such workbook: " + book);
+        string snapFile;
+        List<ExcelTables.Sheet> sheets = Excel().Read(book, out snapFile);
+        if (snapFile == null || !File.Exists(snapFile)) throw new ToolError("the workbook's snapshot is missing (" + snapFile + "): export again");
+        Dictionary<string, object> snap = Json.Parse(File.ReadAllText(snapFile)) as Dictionary<string, object>;
+        Dictionary<string, Dictionary<string, object>> snapTables = new Dictionary<string, Dictionary<string, object>>();
+        foreach (object o in (object[])snap["tables"]) { Dictionary<string, object> d = (Dictionary<string, object>)o; snapTables[Json.Str(d, "table")] = d; }
+
+        // workbook -> edited full tables, against the snapshot
+        List<SapTables.Table> edited = new List<SapTables.Table>(), before = new List<SapTables.Table>();
+        List<object> report = new List<object>();
+        List<object> changes = new List<object>();
+        foreach (ExcelTables.Sheet s in sheets)
+        {
+            Dictionary<string, object> st;
+            if (!snapTables.TryGetValue(s.Table, out st)) throw new ToolError("sheet '" + s.Name + "': table " + s.Table + " is not in the snapshot");
+            string[] fields = Json.Strs(st, "fields");
+            List<string[]> rows = new List<string[]>();
+            foreach (object ro in (object[])st["rows"]) rows.Add(Array.ConvertAll((object[])ro, delegate(object x) { return Convert.ToString(x, Json.Inv); }));
+            HashSet<int> exportedIds = new HashSet<int>();
+            foreach (object x in (object[])st["exported"]) exportedIds.Add(Convert.ToInt32(x, Json.Inv));
+            int[] map = new int[s.Fields.Length];
+            for (int c = 0; c < s.Fields.Length; c++)
+            {
+                map[c] = Array.IndexOf(fields, s.Fields[c]);
+                if (map[c] < 0) throw new ToolError("sheet '" + s.Name + "': column '" + s.Fields[c] + "' is not a field of " + s.Table);
+            }
+            foreach (string f in fields) if (Array.IndexOf(s.Fields, f) < 0) throw new ToolError("sheet '" + s.Name + "': column '" + f + "' was removed; keep every column");
+            SapTables.Table snapT = new SapTables.Table(); snapT.Key = s.Table; snapT.Fields = fields; snapT.Rows = rows;
+            List<string[]> next = new List<string[]>();
+            for (int i = 0; i < rows.Count; i++) next.Add((string[])rows[i].Clone());
+            bool[] seen = new bool[rows.Count];
+            List<string[]> added = new List<string[]>();
+            int changed = 0;
+            for (int k = 0; k < s.Rows.Count; k++)
+            {
+                string[] row = new string[fields.Length];
+                for (int c = 0; c < s.Fields.Length; c++) row[map[c]] = s.Rows[k][c];
+                for (int c = 0; c < row.Length; c++) if (row[c] == null) row[c] = "";
+                int id = s.RowIds[k];
+                if (id >= 0 && id < rows.Count && exportedIds.Contains(id) && !seen[id])
+                {
+                    seen[id] = true;
+                    if (!SameRow(fields, rows[id], fields, row)) { changed++; changes.Add(Json.O("table", s.Table, "before", RowObj(fields, rows[id]), "after", RowObj(fields, row))); next[id] = row; }
+                }
+                else { added.Add(row); changes.Add(Json.O("table", s.Table, "before", null, "after", RowObj(fields, row))); }
+            }
+            List<int> deleted = new List<int>();
+            foreach (int id in exportedIds) if (id < rows.Count && !seen[id]) { deleted.Add(id); changes.Add(Json.O("table", s.Table, "before", RowObj(fields, rows[id]), "after", null)); }
+            deleted.Sort(); for (int i = deleted.Count - 1; i >= 0; i--) next.RemoveAt(deleted[i]);
+            next.AddRange(added);
+            report.Add(Json.O("table", s.Table, "sheet", s.Name, "changed", changed, "added", added.Count, "deleted", deleted.Count, "rowsAfter", next.Count));
+            if (changed + added.Count + deleted.Count == 0) continue;
+            SapTables.Table t = new SapTables.Table(); t.Key = s.Table; t.Fields = fields; t.Rows = next;
+            edited.Add(t); before.Add(snapT);
+        }
+        Dictionary<string, object> res = Json.O("workbook", book, "tables", report);
+        if (edited.Count == 0) { res["note"] = "the workbook matches the export: nothing to import"; res["changes"] = changes; return res; }
+
+        Func<SapRead, List<object>> drift = delegate(SapRead r)
+        {
+            List<object> d = new List<object>();
+            SapTables tt = r.Tables();
+            for (int i = 0; i < before.Count; i++)
+            {
+                SapTables.Table now = tt.Read(before[i].Key, "");
+                bool same = now.Rows.Count == before[i].Rows.Count;
+                for (int k = 0; same && k < now.Rows.Count; k++) same = SameRow(now.Fields, now.Rows[k], before[i].Fields, before[i].Rows[k]);
+                if (!same) d.Add(Json.O("table", before[i].Key, "rowsAtExport", before[i].Rows.Count, "rowsNow", now.Rows.Count));
+            }
+            return d;
+        };
+        if (dry)
+        {
+            List<object> dr = ctx.Sap.Read("import_tables", delegate(SapRead r) { return drift(r); });
+            res["dryRun"] = true;
+            res["changes"] = changes.Count > 100 ? changes.GetRange(0, 100) : changes;
+            if (dr.Count > 0) { res["modelChangedSinceExport"] = dr; res["warning"] = "these tables changed in the model since the export; importing replaces them with the workbook (force: true)"; }
+            res["note"] = "dry run: nothing changed. Show the changes to the user; import_tables with dry_run false applies them (into a checkpoint, logged).";
+            return res;
+        }
+        Dictionary<string, object> applied = ctx.Sap.Edit("import_tables", a, false, delegate(SapRead r, SapEdit e)
+        {
+            List<object> dr = drift(r);
+            if (dr.Count > 0 && !force) throw new ToolError("tables changed in the model since the export (" + Json.Write(dr) + "): export again, or force: true to replace them with the workbook");
+            Dictionary<string, object> imp;
+            try { imp = e.Tables().Apply(edited); }
+            catch (ArgumentException x) { throw new ToolError(x.Message); }
+            // read back: rows SAP2000 did not take as sent
+            List<object> notTaken = new List<object>();
+            SapTables tt = r.Tables();
+            foreach (SapTables.Table t in edited)
+            {
+                SapTables.Table now = tt.Read(t.Key, "");
+                int miss = 0;
+                for (int k = 0; k < t.Rows.Count; k++) if (k >= now.Rows.Count || !SameRow(t.Fields, t.Rows[k], now.Fields, now.Rows[k], true)) miss++;
+                if (miss > 0 || now.Rows.Count != t.Rows.Count) notTaken.Add(Json.O("table", t.Key, "rowsSent", t.Rows.Count, "rowsNow", now.Rows.Count, "rowsDiffering", miss));
+            }
+            Dictionary<string, object> out1 = Json.O("edit", "import " + edited.Count + " table(s) from " + Path.GetFileName(book), "import", imp, "changes", changes);
+            if (notTaken.Count > 0) out1["notAsSent"] = notTaken;
+            return out1;
+        }, NewSessionDir);
+        applied["tables"] = report;
+        applied["workbook"] = book;
+        return applied;
+    }
+
+    // Rows equal field by field (by name); numbers compare as numbers ("0.250" = "0.25"). sentOnly: a's empty fields
+    // are not compared (SAP2000 fills them in on import, e.g. a new row's GUID).
+    static bool SameRow(string[] fa, string[] a, string[] fb, string[] b) { return SameRow(fa, a, fb, b, false); }
+
+    static bool SameRow(string[] fa, string[] a, string[] fb, string[] b, bool sentOnly)
+    {
+        for (int i = 0; i < fa.Length; i++)
+        {
+            int j = Array.IndexOf(fb, fa[i]);
+            string x = i < a.Length ? a[i] ?? "" : "", y = j >= 0 && j < b.Length ? b[j] ?? "" : "";
+            if (x == y || (sentOnly && x.Length == 0)) continue;
+            double dx, dy;
+            if (double.TryParse(x, System.Globalization.NumberStyles.Float, Json.Inv, out dx) && double.TryParse(y, System.Globalization.NumberStyles.Float, Json.Inv, out dy)
+                && Math.Abs(dx - dy) <= 1e-12 * Math.Max(1, Math.Max(Math.Abs(dx), Math.Abs(dy)))) continue;
+            return false;
+        }
+        return true;
+    }
+
+    static Dictionary<string, object> RowObj(string[] fields, string[] row)
+    {
+        Dictionary<string, object> d = new Dictionary<string, object>();
+        for (int i = 0; i < fields.Length; i++) d[fields[i]] = i < row.Length ? row[i] : "";
+        return d;
     }
 
     // ---------------------------------------------------------------- phase 4 handlers

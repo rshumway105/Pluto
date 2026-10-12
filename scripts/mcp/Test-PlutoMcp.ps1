@@ -6,9 +6,11 @@
 # compare, viewer export), and with -SelfTest also opens the self-test beam and checks its hand values through
 # them. -Edit (with -SelfTest) edits the beam through the phase 3 tools, runs it and checks hand values, checkpoints,
 # revert and the change log. -Viewer (with -Model -Run) drives the live viewer in a headless Edge through the viewer
-# tools. Replies are printed cut to -Show characters.
-#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-SelfTest [-Edit]] [-Model <sdb|s2k> [-Run [-Viewer]]] [-Show 600]
-param([switch]$Direct, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [switch]$Viewer, [int]$Show = 600)
+# tools. -Tables (with -SelfTest) exports beam tables to Excel, edits the workbook in Excel and imports it back.
+# -Isolated: the server starts its own SAP2000 (PLUTO_SAP_INSTANCE=new) and closes it, so the user's is not touched.
+# Replies are printed cut to -Show characters.
+#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-Isolated] [-SelfTest [-Edit] [-Tables]] [-Model <sdb|s2k> [-Run [-Viewer]]] [-Show 600]
+param([switch]$Direct, [switch]$Isolated, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [switch]$Viewer, [switch]$Tables, [int]$Show = 600)
 $ErrorActionPreference = "Stop"
 $psi = New-Object Diagnostics.ProcessStartInfo
 if ($Direct) {
@@ -18,11 +20,15 @@ if ($Direct) {
     $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot "Start-PlutoMcp.ps1") + '"'
 }
 $psi.UseShellExecute = $false
+# inherited, not through $psi.EnvironmentVariables: .NET Framework lowercases every variable name it passes on that way,
+# and the server's own children (Run-Sap.ps1) then fail in Add-Type
+if ($Isolated) { $env:PLUTO_SAP_INSTANCE = "new" }
 $psi.RedirectStandardInput = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.StandardOutputEncoding = New-Object Text.UTF8Encoding $false
 $p = [Diagnostics.Process]::Start($psi)
+if ($Isolated) { Remove-Item Env:PLUTO_SAP_INSTANCE }
 $stdin = New-Object IO.StreamWriter($p.StandardInput.BaseStream, (New-Object Text.UTF8Encoding $false))
 $stdin.NewLine = "`n"
 $errTask = $p.StandardError.ReadToEndAsync()
@@ -262,6 +268,54 @@ try {
         Check "get_change_log: every applied edit logged" ($cl -and $cl.total -eq 9)
         $e = Tool "set_restraint" @{ names = @("1"); fixed_dofs = @("U1", "U2", "U3", "R1", "R2", "R3") }
         Check "an edit after revert starts a new checkpoint (r004), r001 untouched" ($e -and $e.checkpoint -eq "r004")
+    }
+    if ($Tables) {
+        if (-not $beam) { throw "-Tables needs -SelfTest (it edits the self-test beam)" }
+        # edits the exported workbook the way a user does, in Excel
+        function EditBook([string]$path, [scriptblock]$edit) {
+            $xl = New-Object -ComObject Excel.Application
+            $xl.DisplayAlerts = $false
+            try { $wb = $xl.Workbooks.Open($path); & $edit $wb; $wb.Save(); $wb.Close($false) }
+            finally { $xl.Quit(); [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($xl); [GC]::Collect() }
+        }
+        function SetCell($ws, [string]$keyField, [string]$key, [string]$field, [string]$value) {
+            $cols = $ws.UsedRange.Columns.Count; $rows = $ws.UsedRange.Rows.Count; $kc = 0; $fc = 0
+            for ($c = 1; $c -le $cols; $c++) { $h = [string]$ws.Cells.Item(1, $c).Value2; if ($h -eq $keyField) { $kc = $c }; if ($h -eq $field) { $fc = $c } }
+            for ($r = 2; $r -le $rows; $r++) { if ([string]$ws.Cells.Item($r, $kc).Value2 -eq $key) { $ws.Cells.Item($r, $fc).Value2 = $value; return } }
+            throw "no row $keyField=$key"
+        }
+        function AddRow($ws, [hashtable]$values) {
+            $cols = $ws.UsedRange.Columns.Count; $r = $ws.UsedRange.Rows.Count + 1
+            for ($c = 2; $c -le $cols; $c++) { $h = [string]$ws.Cells.Item(1, $c).Value2; if ($values.ContainsKey($h)) { $ws.Cells.Item($r, $c).Value2 = $values[$h] } }
+        }
+        $o = Tool "open_model" @{ path = $beam } 900
+        $x = Tool "export_tables" @{ tables = @("Joint Coordinates", "Load Pattern Definitions"); open = $false }
+        Check "export_tables: workbook with both tables (3 joints, 1 pattern)" ($x -and (Test-Path $x.workbook) -and ($x.tables | Where-Object { $_.table -eq "Joint Coordinates" }).rows -eq 3 -and ($x.tables | Where-Object { $_.table -eq "Load Pattern Definitions" }).rows -eq 1)
+        EditBook $x.workbook { param($wb)
+            SetCell $wb.Worksheets.Item("Joint Coordinates") "Joint" "3" "Z" "0.25"
+            AddRow $wb.Worksheets.Item("Load Pattern Definitions") @{ LoadPat = "PT2"; DesignType = "Live"; SelfWtMult = "0" }
+        }
+        $dr = Tool "import_tables" @{}
+        $jc = $dr.tables | Where-Object { $_.table -eq "Joint Coordinates" }; $lp = $dr.tables | Where-Object { $_.table -eq "Load Pattern Definitions" }
+        Check "import_tables dry run (default): joint 3 changed, pattern PT2 added, nothing applied" ($dr -and $dr.dryRun -and $jc.changed -eq 1 -and $lp.added -eq 1)
+        $j0 = Tool "get_object" @{ kind = "joint"; name = "3" }
+        Check "dry run left the model alone: joint 3 Z = 0" ($j0 -and $j0.xyz[2] -eq 0)
+        $ap = Tool "import_tables" @{ dry_run = $false } 600
+        Check "import_tables applied into r001, SAP2000 import clean, rows as sent, tables still read" ($ap -and $ap.checkpoint -eq "r001" -and $ap.import.applied -and $ap.import.errors -eq 0 -and -not $ap.notAsSent -and $ap.import.tablesReadable)
+        $j1 = Tool "get_object" @{ kind = "joint"; name = "3" }
+        $dm = Tool "describe_model" @{}
+        Check "the edits took: joint 3 Z = 0.25, pattern PT2 exists" ($j1 -and [Math]::Abs($j1.xyz[2] - 0.25) -lt 1e-9 -and ($dm.loadPatterns | Where-Object name -eq "PT2"))
+        $null = Tool "run_analysis" @{} 900
+        $x2 = Tool "export_tables" @{ tables = @("Joint Coordinates"); open = $false }
+        EditBook $x2.workbook { param($wb) SetCell $wb.Worksheets.Item("Joint Coordinates") "Joint" "3" "Z" "0" }
+        $ap2 = Tool "import_tables" @{ dry_run = $false } 600
+        Check "import after a run: new checkpoint r002 (r001 keeps its results), applied" ($ap2 -and $ap2.checkpoint -eq "r002" -and $ap2.import.applied)
+        $x3 = Tool "export_tables" @{ tables = @("Load Pattern Definitions"); open = $false }
+        EditBook $x3.workbook { param($wb) SetCell $wb.Worksheets.Item("Load Pattern Definitions") "LoadPat" "PT2" "DesignType" "NOT_A_TYPE" }
+        $bad = Tool "import_tables" @{ dry_run = $false } 600
+        Check ("a bad value: SAP2000 reports it (" + (@($bad.import.messages) -join " / ") + "), the row is flagged not as sent, tables still read") ($bad -and @($bad.import.messages).Count -gt 0 -and $bad.notAsSent -and $bad.import.tablesReadable)
+        $x4 = Tool "export_tables" @{ tables = @("Joint Coordinates"); group = "ALL"; open = $false }
+        Check "export_tables by group: the group's rows" ($x4 -and ($x4.tables[0].rows -eq 3))
     }
 } catch {
     Check ("exception: " + $_.Exception.Message) $false
