@@ -220,6 +220,205 @@ public sealed class ToolSet
                 "final_only", Prop("boolean", "Staged / multi-step cases: only the last step."),
                 "cylindrical", Prop("boolean", "Add radial / tangential translations (R, T) for tanks and other axisymmetric models.")),
             ExportViewer);
+
+        // ------------------------------------------------ phase 3: change the model
+
+        const string EditNote = " Goes into a checkpoint of the session, never the opened file (the latest checkpoint while it " +
+            "is not run, else a new rNNN; a run checkpoint keeps its results). Logged in changes.jsonl. Returns before -> " +
+            "after per object. dry_run: shows what would change, changes nothing. Ask the user before large edits.";
+
+        Add("set_frame_section", "Assigns a frame section to frames (names, group and / or saved selection)." + EditNote,
+            Schema(new[] { "section" }, Cat(Targets("frame"), new object[] { "section", Prop("string", "Frame section name (get_sections)."), "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a) { string sec = Json.Str(a, "section"); return Edit("set_frame_section", a, "frame", delegate(SapEdit e, List<string> t, bool d) { return e.SetFrameSection(t, sec, d); }); });
+
+        Add("set_area_section", "Assigns an area section to areas." + EditNote,
+            Schema(new[] { "section" }, Cat(Targets("area"), new object[] { "section", Prop("string", "Area section name (get_sections kind area)."), "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a) { string sec = Json.Str(a, "section"); return Edit("set_area_section", a, "area", delegate(SapEdit e, List<string> t, bool d) { return e.SetAreaSection(t, sec, d); }); });
+
+        Add("set_link_property", "Assigns a link property to links." + EditNote,
+            Schema(new[] { "property" }, Cat(Targets("link"), new object[] { "property", Prop("string", "Link property name (get_sections kind link)."), "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a) { string pr = Json.Str(a, "property"); return Edit("set_link_property", a, "link", delegate(SapEdit e, List<string> t, bool d) { return e.SetLinkProperty(t, pr, d); }); });
+
+        Add("set_material_property", "Changes material values; only those given change: E, nu, alpha (isotropic), weight per volume, " +
+            "Fy / Fu (steel), fc (concrete). Every object using the material is affected." + EditNote,
+            Schema(new[] { "material" }, "material", Prop("string", "Material name (get_materials)."),
+                "E", Prop("number", "Modulus of elasticity."), "nu", Prop("number", "Poisson's ratio."), "alpha", Prop("number", "Thermal coefficient."),
+                "weight_per_volume", Prop("number", "Weight per unit volume."), "Fy", Prop("number", "Steel yield stress."),
+                "Fu", Prop("number", "Steel tensile strength."), "fc", Prop("number", "Concrete compressive strength."), "dry_run", DryRun),
+            SetMaterial);
+
+        Add("set_restraint", "Sets joint restraints (supports): fixed_dofs lists the restrained directions in joint local axes, " +
+            "e.g. all six for fixed, [U1, U2, U3] for pinned, [] to free the joint." + EditNote,
+            Schema(new[] { "fixed_dofs" }, Cat(Targets("joint"), new object[] { "fixed_dofs", Json.O("type", "array", "items", Json.O("type", "string", "enum", new[] { "U1", "U2", "U3", "R1", "R2", "R3" }),
+                "description", "Restrained degrees of freedom."), "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a)
+            {
+                bool[] fix = Dofs(Json.Strs(a, "fixed_dofs"), new[] { "U1", "U2", "U3", "R1", "R2", "R3" }, "fixed_dofs");
+                return Edit("set_restraint", a, "joint", delegate(SapEdit e, List<string> t, bool d) { return e.SetRestraint(t, fix, d); });
+            });
+
+        Add("set_frame_release", "Sets frame end releases (frame local axes; replaces the frame's releases): i_end / j_end list the " +
+            "released forces at each end, e.g. [M2, M3] for a pinned end, [] for fixed. SAP2000 refuses unstable sets." + EditNote,
+            Schema(new[] { "i_end", "j_end" }, Cat(Targets("frame"), new object[] {
+                "i_end", Json.O("type", "array", "items", Json.O("type", "string", "enum", new[] { "P", "V2", "V3", "T", "M2", "M3" }), "description", "Released at the I end."),
+                "j_end", Json.O("type", "array", "items", Json.O("type", "string", "enum", new[] { "P", "V2", "V3", "T", "M2", "M3" }), "description", "Released at the J end."),
+                "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a)
+            {
+                string[] rel = { "P", "V2", "V3", "T", "M2", "M3" };
+                bool[] ii = Dofs(Json.Strs(a, "i_end"), rel, "i_end"), jj = Dofs(Json.Strs(a, "j_end"), rel, "j_end");
+                return Edit("set_frame_release", a, "frame", delegate(SapEdit e, List<string> t, bool d) { return e.SetFrameRelease(t, ii, jj, d); });
+            });
+
+        Add("assign_joint_load", "Joint forces / moments for a load pattern (F1 F2 F3 M1 M2 M3 in csys, default GLOBAL). replace (default " +
+            "true) replaces the joint's loads of that pattern, false adds; clear removes them." + EditNote,
+            Schema(new[] { "pattern" }, Cat(Targets("joint"), new object[] { "pattern", Prop("string", "Load pattern."),
+                "F1", Prop("number", "Force along 1 (X in GLOBAL)."), "F2", Prop("number", "Force along 2."), "F3", Prop("number", "Force along 3 (Z; negative = down)."),
+                "M1", Prop("number", "Moment about 1."), "M2", Prop("number", "Moment about 2."), "M3", Prop("number", "Moment about 3."),
+                "csys", Prop("string", "Coordinate system (default GLOBAL; Local = joint local axes)."),
+                "replace", Prop("boolean", "Replace (default) or add."), "clear", Prop("boolean", "Remove this pattern's joint loads."), "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a)
+            {
+                string pat = Json.Str(a, "pattern"), cs = Json.Str(a, "csys") ?? "GLOBAL";
+                double[] f = new double[6]; string[] k = { "F1", "F2", "F3", "M1", "M2", "M3" };
+                for (int i = 0; i < 6; i++) f[i] = Json.Num(a, k[i]) ?? 0;
+                bool rep = Json.Bool(a, "replace", true), clear = Json.Bool(a, "clear", false);
+                return Edit("assign_joint_load", a, "joint", delegate(SapEdit e, List<string> t, bool d) { return e.AssignJointLoad(t, pat, f, cs, rep, clear, d); });
+            });
+
+        Add("assign_frame_load", "Frame loads for a load pattern: distributed (value per length from start to end; end_value for a " +
+            "trapezoid) or point (value at distance). Distances are relative 0..1 unless relative is false. dir: local1 / local2 / " +
+            "local3, X / Y / Z, X_projected / Y_projected / Z_projected, gravity (positive = down), gravity_projected. replace " +
+            "(default true) replaces the frame's loads of that pattern and type, false adds; clear removes them." + EditNote,
+            Schema(new[] { "pattern", "type", "dir" }, Cat(Targets("frame"), new object[] { "pattern", Prop("string", "Load pattern."),
+                "type", Enum("distributed or point.", new[] { "distributed", "point" }),
+                "load", Enum("force (default) or moment.", new[] { "force", "moment" }),
+                "dir", Prop("string", "Direction (see above)."),
+                "value", Prop("number", "Distributed: value at start (per length); point: the load."),
+                "end_value", Prop("number", "Distributed: value at end (default = value)."),
+                "start", Prop("number", "Distributed: start (default 0); point: location (default 0.5)."),
+                "end", Prop("number", "Distributed: end (default 1, the whole frame)."),
+                "relative", Prop("boolean", "Distances relative 0..1 (default true) or lengths."),
+                "csys", Prop("string", "Coordinate system for X / Y / Z directions (default GLOBAL)."),
+                "replace", Prop("boolean", "Replace (default) or add."), "clear", Prop("boolean", "Remove this pattern's frame loads of this type."), "dry_run", DryRun })),
+            AssignFrameLoad);
+
+        Add("assign_area_load", "Uniform area load (force per area) for a load pattern, dir as for frame loads (gravity: positive = down). " +
+            "replace (default true) replaces the area's uniform loads of that pattern, false adds; clear removes them." + EditNote,
+            Schema(new[] { "pattern", "dir" }, Cat(Targets("area"), new object[] { "pattern", Prop("string", "Load pattern."),
+                "value", Prop("number", "Force per unit area."), "dir", Prop("string", "Direction: local1 / local2 / local3, X / Y / Z, ..._projected, gravity."),
+                "csys", Prop("string", "Coordinate system for X / Y / Z directions (default GLOBAL)."),
+                "replace", Prop("boolean", "Replace (default) or add."), "clear", Prop("boolean", "Remove this pattern's uniform loads."), "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a)
+            {
+                string pat = Json.Str(a, "pattern"); int dir = DirCode(Json.Str(a, "dir"));
+                string cs = Json.Str(a, "csys") ?? (dir <= 3 ? "Local" : "GLOBAL");
+                double v = Json.Num(a, "value") ?? 0; bool rep = Json.Bool(a, "replace", true), clear = Json.Bool(a, "clear", false);
+                if (!clear && Json.Num(a, "value") == null) throw new ToolError("value is required (or clear)");
+                return Edit("assign_area_load", a, "area", delegate(SapEdit e, List<string> t, bool d) { return e.AssignAreaLoad(t, pat, v, dir, cs, rep, clear, d); });
+            });
+
+        Add("define_load_pattern", "Adds a load pattern (with its linear static case of the same name) or changes an existing one's type / " +
+            "self-weight multiplier." + EditNote,
+            Schema(new[] { "name" }, "name", Prop("string", "Pattern name."),
+                "type", Prop("string", "Dead, SuperDead, Live, ReduceLive, Quake, Wind, Snow, Other, ... (required for a new pattern)."),
+                "self_weight_multiplier", Prop("number", "Self weight multiplier (1 includes the model's weight)."), "dry_run", DryRun),
+            delegate(Dictionary<string, object> a)
+            {
+                string name = Json.Str(a, "name"), type = Json.Str(a, "type"); double? sw = Json.Num(a, "self_weight_multiplier");
+                return EditModel("define_load_pattern", a, delegate(SapEdit e, bool d) { return e.DefinePattern(name, type, sw, d); });
+            });
+
+        Add("define_load_case", "Adds or redefines a linear or nonlinear static load case: its loads (pattern, scale) replace the old " +
+            "ones; initial_case is the case it continues from ('' = zero initial conditions)." + EditNote,
+            Schema(new[] { "name", "loads" }, "name", Prop("string", "Case name."),
+                "type", Enum("linear_static (default) or nonlinear_static.", new[] { "linear_static", "nonlinear_static" }),
+                "loads", Json.O("type", "array", "items", Json.O("type", "object", "properties", Json.O("pattern", Json.O("type", "string"), "scale", Json.O("type", "number")), "required", new[] { "pattern" }),
+                    "description", "[{\"pattern\": name, \"scale\": factor (default 1)}]."),
+                "initial_case", Prop("string", "Case to continue from ('' = zero; omit = unchanged)."), "dry_run", DryRun),
+            delegate(Dictionary<string, object> a)
+            {
+                string name = Json.Str(a, "name"), type = Json.Str(a, "type") ?? "linear_static", init = Json.Str(a, "initial_case");
+                if (type != "linear_static" && type != "nonlinear_static") throw new ToolError("type is linear_static or nonlinear_static");
+                List<KeyValuePair<string, double>> loads = Pairs(a, "loads", "pattern");
+                return EditModel("define_load_case", a, delegate(SapEdit e, bool d) { return e.DefineStaticCase(name, type == "nonlinear_static", loads, init, d); });
+            });
+
+        Add("define_combo", "Adds or redefines a load combination: type linear (additive, default), envelope, absolute, srss or range; its " +
+            "items (case or combination, scale) replace the old ones." + EditNote,
+            Schema(new[] { "name", "items" }, "name", Prop("string", "Combination name."),
+                "type", Enum("Combination type.", SapEdit.ComboTypes),
+                "items", Json.O("type", "array", "items", Json.O("type", "object", "properties", Json.O("name", Json.O("type", "string"), "scale", Json.O("type", "number")), "required", new[] { "name" }),
+                    "description", "[{\"name\": case or combination, \"scale\": factor (default 1)}]."), "dry_run", DryRun),
+            delegate(Dictionary<string, object> a)
+            {
+                string name = Json.Str(a, "name"), type = Json.Str(a, "type");
+                List<KeyValuePair<string, double>> items = Pairs(a, "items", "name");
+                return EditModel("define_combo", a, delegate(SapEdit e, bool d) { return e.DefineCombo(name, type, items, d); });
+            });
+
+        Add("set_group", "Adds objects to and / or removes them from a SAP2000 group (created when missing): add / remove name lists of " +
+            "one kind, add_selection adds every object of a saved selection, add_group every member of another group." + EditNote,
+            Schema(new[] { "group" }, "group", Prop("string", "Group name."),
+                "kind", Enum("Kind of the names in add / remove.", Kinds),
+                "add", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Names to add."),
+                "remove", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Names to remove."),
+                "add_selection", Prop("string", "Saved selection whose objects are added."),
+                "add_group", Prop("string", "Group whose members are added."), "dry_run", DryRun),
+            SetGroup);
+
+        Add("move_joints", "Moves joints by delta [dx, dy, dz] (global), or one joint to [x, y, z]. Connected objects follow." + EditNote,
+            Schema(Cat(Targets("joint"), new object[] {
+                "delta", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[dx, dy, dz]."),
+                "to", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[x, y, z] for one joint."),
+                "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a)
+            {
+                double[] delta = Json.Nums(a, "delta"), to = Json.Nums(a, "to");
+                return Edit("move_joints", a, "joint", delegate(SapEdit e, List<string> t, bool d) { return e.MoveJoints(t, delta, to, d); });
+            });
+
+        Add("add_frame", "Adds a frame between joints i and j, or between points from and to (joints made where none exists), with a section." + EditNote,
+            Schema(new[] { "section" }, "i", Prop("string", "Start joint."), "j", Prop("string", "End joint."),
+                "from", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[x, y, z] start (global)."),
+                "to", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[x, y, z] end."),
+                "section", Prop("string", "Frame section."), "name", Prop("string", "Frame name (default: SAP2000 picks one)."), "dry_run", DryRun),
+            delegate(Dictionary<string, object> a)
+            {
+                string i = Json.Str(a, "i"), j = Json.Str(a, "j"), sec = Json.Str(a, "section"), name = Json.Str(a, "name");
+                double[] xi = Json.Nums(a, "from"), xj = Json.Nums(a, "to");
+                return EditModel("add_frame", a, delegate(SapEdit e, bool d) { return e.AddFrame(i, j, xi, xj, sec, name, d); });
+            });
+
+        Add("delete_objects", "Deletes frames, areas or links with their loads and assignments (joints go with their last object)." + EditNote,
+            Schema(new[] { "kind" }, Cat(new object[] { "kind", Enum("frame, area or link.", new[] { "frame", "area", "link" }) }, TargetsOf("objects"), new object[] { "dry_run", DryRun })),
+            delegate(Dictionary<string, object> a)
+            {
+                string kind = Kind(a, "kind", true);
+                return Edit("delete_objects", a, kind, delegate(SapEdit e, List<string> t, bool d) { return e.DeleteObjects(kind, t, d); });
+            });
+
+        Add("revert", "Reopens a checkpoint of the current session (rNNN, see list_checkpoints) in SAP2000, replacing what it holds. A run " +
+            "checkpoint's results are queryable again; the next edit or run saves a new checkpoint, so rNNN stays as it is.",
+            Schema(new[] { "checkpoint" }, "checkpoint", Prop("string", "e.g. r000 (the model as opened), r002."),
+                "session_dir", Prop("string", "Another session's folder (default: the current model's).")),
+            delegate(Dictionary<string, object> a)
+            {
+                string cp = Json.Str(a, "checkpoint");
+                if (string.IsNullOrEmpty(cp)) throw new ToolError("checkpoint is required (list_checkpoints)");
+                return ctx.Sap.Revert(cp, Json.Str(a, "session_dir"));
+            });
+
+        Add("list_checkpoints", "The session's checkpoints: each rNNN with when it was saved, whether it was run (case status, " +
+            "equilibrium), the edits made into it, and which one SAP2000 holds. Read only.",
+            Schema("session_dir", Prop("string", "Another session's folder (default: the current model's).")),
+            ListCheckpoints);
+
+        Add("get_change_log", "The session's edit log (changes.jsonl): tool, arguments, checkpoint, time, and the changes (first 20 " +
+            "per edit; the file has up to 2000). Read only.",
+            Schema("checkpoint", Prop("string", "Only edits into this checkpoint."), "offset", Prop("integer", "First entry (default 0)."),
+                "limit", Prop("integer", "Entries (default 50)."), "session_dir", Prop("string", "Another session's folder.")),
+            GetChangeLog);
     }
 
     object Status(Dictionary<string, object> a)
@@ -584,6 +783,272 @@ public sealed class ToolSet
         if (result == null) reply["warning"] = "Run-Sap.ps1 printed no RESULT line: see the log";
         if (!File.Exists(outBase + ".bin")) reply["warning"] = "no .bin was written: see the log";
         return reply;
+    }
+
+    // ---------------------------------------------------------------- phase 3 handlers
+
+    static readonly Dictionary<string, object> DryRun = Prop("boolean", "Only report what would change (default false).");
+
+    delegate Dictionary<string, object> TargetEdit(SapEdit e, List<string> targets, bool dryRun);
+    delegate Dictionary<string, object> ModelEdit(SapEdit e, bool dryRun);
+
+    // An edit of named objects of one kind (names / group / selection, combined).
+    object Edit(string tool, Dictionary<string, object> a, string kind, TargetEdit fn)
+    {
+        string selection = Json.Str(a, "selection");
+        Dictionary<string, object> saved = selection == null ? null : LoadSelection(selection);
+        bool dry = Json.Bool(a, "dry_run", false);
+        return ctx.Sap.Edit(tool, a, dry, delegate(SapRead r, SapEdit e)
+        {
+            List<string> t = Resolve(r, kind, a, saved);
+            if (t.Count == 0) throw new ToolError("no " + kind + "s match");
+            Dictionary<string, object> res = fn(e, t, dry);
+            res["targets"] = t.Count;
+            return res;
+        }, NewSessionDir);
+    }
+
+    object EditModel(string tool, Dictionary<string, object> a, ModelEdit fn)
+    {
+        bool dry = Json.Bool(a, "dry_run", false);
+        return ctx.Sap.Edit(tool, a, dry, delegate(SapRead r, SapEdit e) { return fn(e, dry); }, NewSessionDir);
+    }
+
+    static object[] Targets(string kind) { return TargetsOf(kind + "s"); }
+
+    static object[] TargetsOf(string what)
+    {
+        return new object[] {
+            "names", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Names of the " + what + "."),
+            "group", Prop("string", "Every one of the " + what + " in this SAP2000 group."),
+            "selection", Prop("string", "Every one of the " + what + " in a selection saved by select_objects.") };
+    }
+
+    static object[] Cat(params object[][] parts)
+    {
+        List<object> all = new List<object>();
+        foreach (object[] p in parts) all.AddRange(p);
+        return all.ToArray();
+    }
+
+    // Objects of one kind named by names, group and saved selection together (at least one), in model order.
+    static List<string> Resolve(SapRead r, string kind, Dictionary<string, object> a, Dictionary<string, object> saved)
+    {
+        string[] names = Json.Strs(a, "names");
+        string group = Json.Str(a, "group");
+        if (names == null && group == null && saved == null) throw new ToolError("say which " + kind + "s: names, group or selection");
+        SapRead.Index x = r.Objects();
+        List<string> all = x.Names(kind);
+        HashSet<string> set = null;
+        if (names != null)
+        {
+            HashSet<string> known = new HashSet<string>(all);
+            foreach (string n in names) if (!known.Contains(n)) throw new ToolError("no " + kind + " '" + n + "'");
+            set = new HashSet<string>(names);
+        }
+        if (group != null)
+        {
+            if (!r.GroupExists(group)) throw new ToolError("no group '" + group + "'");
+            HashSet<string> g = new HashSet<string>(r.GroupMembers(group, kind));
+            if (set == null) set = g; else set.IntersectWith(g);
+        }
+        if (saved != null)
+        {
+            HashSet<string> sv = new HashSet<string>(SelectionNames(saved, kind));
+            if (set == null) set = sv; else set.IntersectWith(sv);
+        }
+        return all.FindAll(delegate(string n) { return set.Contains(n); });
+    }
+
+    static bool[] Dofs(string[] given, string[] all, string key)
+    {
+        if (given == null) throw new ToolError(key + " is required: a list of " + string.Join(", ", all) + " ([] for none)");
+        bool[] b = new bool[6];
+        foreach (string g in given)
+        {
+            int i = Array.FindIndex(all, delegate(string d) { return string.Equals(d, g, StringComparison.OrdinalIgnoreCase); });
+            if (i < 0) throw new ToolError(key + ": '" + g + "' is not one of " + string.Join(", ", all));
+            b[i] = true;
+        }
+        return b;
+    }
+
+    // Load direction names -> SAP2000 codes (1-3 local, 4-6 X Y Z, 7-9 projected, 10 gravity, 11 projected gravity).
+    static int DirCode(string d)
+    {
+        if (d == null) throw new ToolError("dir is required: local1, local2, local3, X, Y, Z, X_projected, Y_projected, Z_projected, gravity, gravity_projected");
+        string k = d.ToLowerInvariant().Replace(" ", "").Replace("_", "").Replace("-", "");
+        string[] names = { "", "local1", "local2", "local3", "x", "y", "z", "xprojected", "yprojected", "zprojected", "gravity", "gravityprojected" };
+        int i = Array.IndexOf(names, k);
+        if (i > 0) return i;
+        int n;
+        if (int.TryParse(k, out n) && n >= 1 && n <= 11) return n;
+        throw new ToolError("dir '" + d + "' is not one of local1, local2, local3, X, Y, Z, X_projected, Y_projected, Z_projected, gravity, gravity_projected");
+    }
+
+    // [{key: name, scale: number}] -> (name, scale), scale default 1.
+    static List<KeyValuePair<string, double>> Pairs(Dictionary<string, object> a, string key, string nameKey)
+    {
+        List<KeyValuePair<string, double>> r = new List<KeyValuePair<string, double>>();
+        object v;
+        if (!a.TryGetValue(key, out v) || !(v is object[])) throw new ToolError(key + " is required: [{\"" + nameKey + "\": ..., \"scale\": ...}]");
+        foreach (object o in (object[])v)
+        {
+            Dictionary<string, object> d = o as Dictionary<string, object>;
+            string n = d == null ? null : Json.Str(d, nameKey);
+            if (string.IsNullOrEmpty(n)) throw new ToolError("every " + key + " entry needs \"" + nameKey + "\"");
+            r.Add(new KeyValuePair<string, double>(n, Json.Num(d, "scale") ?? 1));
+        }
+        return r;
+    }
+
+    object SetMaterial(Dictionary<string, object> a)
+    {
+        string mat = Json.Str(a, "material");
+        Dictionary<string, double> v = new Dictionary<string, double>();
+        string[][] map = { new[] { "E", "E" }, new[] { "nu", "nu" }, new[] { "alpha", "alpha" }, new[] { "weight_per_volume", "weightPerVolume" },
+            new[] { "Fy", "Fy" }, new[] { "Fu", "Fu" }, new[] { "fc", "fc" } };
+        foreach (string[] m in map) { double? x = Json.Num(a, m[0]); if (x != null) v[m[1]] = x.Value; }
+        if (v.Count == 0) throw new ToolError("give at least one of E, nu, alpha, weight_per_volume, Fy, Fu, fc");
+        return EditModel("set_material_property", a, delegate(SapEdit e, bool d) { return e.SetMaterial(mat, v, d); });
+    }
+
+    object AssignFrameLoad(Dictionary<string, object> a)
+    {
+        string pat = Json.Str(a, "pattern"), type = Json.Str(a, "type"), load = Json.Str(a, "load") ?? "force";
+        if (type != "distributed" && type != "point") throw new ToolError("type is distributed or point");
+        if (load != "force" && load != "moment") throw new ToolError("load is force or moment");
+        int dir = DirCode(Json.Str(a, "dir"));
+        bool point = type == "point", rel = Json.Bool(a, "relative", true), rep = Json.Bool(a, "replace", true), clear = Json.Bool(a, "clear", false);
+        if (!clear && Json.Num(a, "value") == null) throw new ToolError("value is required (or clear)");
+        double v1 = Json.Num(a, "value") ?? 0, v2 = Json.Num(a, "end_value") ?? v1;
+        double d1 = Json.Num(a, "start") ?? (point ? (rel ? 0.5 : 0) : 0), d2 = Json.Num(a, "end") ?? 1;
+        if (!point && !rel && Json.Num(a, "end") == null) throw new ToolError("end is required when relative is false");
+        string cs = Json.Str(a, "csys") ?? (dir <= 3 ? "Local" : "GLOBAL");
+        return Edit("assign_frame_load", a, "frame", delegate(SapEdit e, List<string> t, bool d)
+        {
+            return e.AssignFrameLoad(t, pat, point, load == "moment", dir, d1, d2, v1, v2, rel, cs, rep, clear, d);
+        });
+    }
+
+    object SetGroup(Dictionary<string, object> a)
+    {
+        string group = Json.Str(a, "group"), kind = Kind(a, "kind", false), fromSel = Json.Str(a, "add_selection"), fromGroup = Json.Str(a, "add_group");
+        string[] add = Json.Strs(a, "add"), remove = Json.Strs(a, "remove");
+        if (string.IsNullOrEmpty(group)) throw new ToolError("group is required");
+        if ((add != null || remove != null) && kind == null) throw new ToolError("kind is required with add / remove");
+        if (add == null && remove == null && fromSel == null && fromGroup == null) throw new ToolError("give add, remove, add_selection or add_group");
+        Dictionary<string, object> saved = fromSel == null ? null : LoadSelection(fromSel);
+        bool dry = Json.Bool(a, "dry_run", false);
+        return ctx.Sap.Edit("set_group", a, dry, delegate(SapRead r, SapEdit e)
+        {
+            Dictionary<string, List<string>> plus = new Dictionary<string, List<string>>(), minus = new Dictionary<string, List<string>>();
+            HashSet<string> known = kind == null ? null : new HashSet<string>(r.Objects().Names(kind));
+            if (add != null) { foreach (string n in add) if (!known.Contains(n)) throw new ToolError("no " + kind + " '" + n + "'"); plus[kind] = new List<string>(add); }
+            if (remove != null) minus[kind] = new List<string>(remove);
+            foreach (string k in Kinds)
+            {
+                List<string> more = new List<string>();
+                if (saved != null) more.AddRange(SelectionNames(saved, k));
+                if (fromGroup != null)
+                {
+                    if (!r.GroupExists(fromGroup)) throw new ToolError("no group '" + fromGroup + "'");
+                    more.AddRange(r.GroupMembers(fromGroup, k));
+                }
+                if (more.Count == 0) continue;
+                List<string> l;
+                if (!plus.TryGetValue(k, out l)) { l = new List<string>(); plus[k] = l; }
+                foreach (string n in more) if (!l.Contains(n)) l.Add(n);
+            }
+            return e.SetGroup(group, plus, minus, dry);
+        }, NewSessionDir);
+    }
+
+    // The session dir named, or the current model's.
+    string SessionDirFor(Dictionary<string, object> a)
+    {
+        string dir = Json.Str(a, "session_dir");
+        if (dir != null) { if (!File.Exists(Path.Combine(dir, "session.json"))) throw new ToolError("no Pluto session in " + dir); return dir; }
+        string model = ctx.Sap.Read("session", delegate(SapRead r) { return r.ModelPath(); });
+        dir = SapDriver.SessionDirOf(model);
+        if (dir == null) throw new ToolError("SAP2000 holds " + model + ", which is not a Pluto session: open_model first");
+        return dir;
+    }
+
+    object ListCheckpoints(Dictionary<string, object> a)
+    {
+        string dir = SessionDirFor(a);
+        string current = null;
+        try { current = ctx.Sap.Read("session", delegate(SapRead r) { return r.ModelPath(); }); } catch (ToolError) { }
+        Dictionary<string, List<string>> edits = new Dictionary<string, List<string>>();
+        foreach (Dictionary<string, object> e in ChangeLines(dir))
+        {
+            string cp = Json.Str(e, "checkpoint") ?? "?";
+            List<string> l;
+            if (!edits.TryGetValue(cp, out l)) { l = new List<string>(); edits[cp] = l; }
+            l.Add(Json.Str(e, "tool") + ": " + (Json.Str(e, "edit") ?? "") + " (" + Convert.ToString(e.ContainsKey("changed") ? e["changed"] : 0, Json.Inv) + ")");
+        }
+        List<string> files = new List<string>(Directory.GetFiles(dir, "r*.sdb"));
+        files.Sort(StringComparer.OrdinalIgnoreCase);
+        List<object> list = new List<object>();
+        foreach (string f in files)
+        {
+            string n = Path.GetFileNameWithoutExtension(f);
+            if (!System.Text.RegularExpressions.Regex.IsMatch(n, @"^r\d+$")) continue;
+            Dictionary<string, object> d = Json.O("checkpoint", n, "savedUtc", File.GetLastWriteTimeUtc(f).ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv),
+                "held", current != null && string.Equals(Path.GetFullPath(current), Path.GetFullPath(f), StringComparison.OrdinalIgnoreCase));
+            if (n == "r000") d["what"] = "the model as opened";
+            string summary = Path.Combine(dir, "runs", n, "summary.json");
+            if (File.Exists(summary))
+            {
+                Dictionary<string, object> s = Json.Parse(File.ReadAllText(summary)) as Dictionary<string, object>;
+                Dictionary<string, object> run = s == null ? null : Json.Obj(s, "run");
+                Dictionary<string, object> react = s == null ? null : Json.Obj(s, "reactions");
+                List<object> eq = new List<object>();
+                object cl;
+                if (react != null && react.TryGetValue("cases", out cl) && cl is object[])
+                    foreach (object o in (object[])cl) { Dictionary<string, object> c = o as Dictionary<string, object>; if (c != null) eq.Add(Json.Str(c, "case") + " " + Json.Str(c, "check")); }
+                d["run"] = Json.O("cases", run == null ? null : run["cases"], "notFinished", run != null && run.ContainsKey("notFinished") ? run["notFinished"] : null, "equilibrium", eq);
+            }
+            else d["run"] = Directory.Exists(Path.Combine(dir, "runs", n)) ? (object)"run (no summary)" : null;
+            List<string> el;
+            if (edits.TryGetValue(n, out el)) { d["edits"] = el.Count > 20 ? el.GetRange(0, 20) : el; d["editCount"] = el.Count; }
+            list.Add(d);
+        }
+        Dictionary<string, object> sj = File.Exists(Path.Combine(dir, "session.json")) ? Json.Parse(File.ReadAllText(Path.Combine(dir, "session.json"))) as Dictionary<string, object> : null;
+        return Json.O("sessionDir", dir, "original", sj == null ? null : Json.Str(sj, "original"), "checkpoints", list,
+            "note", "revert(checkpoint) reopens one; edits and runs go into the latest checkpoint while it is not run, else a new one");
+    }
+
+    object GetChangeLog(Dictionary<string, object> a)
+    {
+        string dir = SessionDirFor(a), cp = Json.Str(a, "checkpoint");
+        int offset = Json.Int(a, "offset", 0), limit = Math.Min(500, Math.Max(1, Json.Int(a, "limit", 50)));
+        List<Dictionary<string, object>> lines = ChangeLines(dir).FindAll(delegate(Dictionary<string, object> e) { return cp == null || Json.Str(e, "checkpoint") == cp; });
+        foreach (Dictionary<string, object> e in lines)
+        {
+            object c;
+            if (e.TryGetValue("changes", out c) && c is object[] && ((object[])c).Length > 20)
+            {
+                object[] all = (object[])c; object[] first = new object[20]; Array.Copy(all, first, 20);
+                e["changes"] = first; e["changesListed"] = 20;
+            }
+        }
+        return Page(Json.O("sessionDir", dir, "file", Path.Combine(dir, "changes.jsonl")), "entries", lines, offset, limit);
+    }
+
+    static List<Dictionary<string, object>> ChangeLines(string dir)
+    {
+        List<Dictionary<string, object>> r = new List<Dictionary<string, object>>();
+        string f = Path.Combine(dir, "changes.jsonl");
+        if (!File.Exists(f)) return r;
+        foreach (string l in File.ReadAllLines(f))
+        {
+            if (l.Trim().Length == 0) continue;
+            Dictionary<string, object> d = Json.Parse(l) as Dictionary<string, object>;
+            if (d != null) r.Add(d);
+        }
+        return r;
     }
 
     static string Tail(string s, int n) { s = (s ?? "").Trim(); return s.Length <= n ? s : "..." + s.Substring(s.Length - n); }

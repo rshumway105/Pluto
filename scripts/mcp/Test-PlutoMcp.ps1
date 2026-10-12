@@ -4,9 +4,10 @@
 # Exit 0 = all checks passed. -Model opens that file in the running SAP2000 (replacing what it holds) as a
 # working copy and runs every phase 1 tool on it; -Run adds the phase 2 tools (two runs, results, reactions,
 # compare, viewer export), and with -SelfTest also opens the self-test beam and checks its hand values through
-# them. Replies are printed cut to -Show characters.
-#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-SelfTest] [-Model <sdb|s2k> [-Run]] [-Show 600]
-param([switch]$Direct, [switch]$SelfTest, [string]$Model, [switch]$Run, [int]$Show = 600)
+# them. -Edit (with -SelfTest) edits the beam through the phase 3 tools, runs it and checks hand values, checkpoints,
+# revert and the change log. Replies are printed cut to -Show characters.
+#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-SelfTest [-Edit]] [-Model <sdb|s2k> [-Run]] [-Show 600]
+param([switch]$Direct, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [int]$Show = 600)
 $ErrorActionPreference = "Stop"
 $psi = New-Object Diagnostics.ProcessStartInfo
 if ($Direct) {
@@ -77,8 +78,7 @@ try {
         if (-not $r.result.isError) { $beam = ($text | ConvertFrom-Json).model }
     }
 
-    if ($Model) {
-        $script:id = 10
+    $script:id = 10
         function Tool([string]$name, $arguments, [int]$timeoutSec = 600, [switch]$ExpectError) {
             $script:id++
             $r = Call $script:id "tools/call" @{ name = $name; arguments = $arguments } $timeoutSec
@@ -90,6 +90,7 @@ try {
             if ($r.result.isError) { return $null }
             return ($text | ConvertFrom-Json)
         }
+    if ($Model) {
         $o = Tool "open_model" @{ path = [IO.Path]::GetFullPath($Model) } 900
         Check "open_model: working copy under the work dir, original untouched" ($o -and $o.workingCopy -like "*\models\*\r000.sdb")
         $d = Tool "describe_model" @{ max_rows = 20 }
@@ -171,6 +172,57 @@ try {
                 Check "beam: two supports at 5 kip" ($rq -and $rq.top.Count -eq 2 -and [Math]::Abs($rq.top[0].value - 5) -lt 1e-6 -and [Math]::Abs($rq.top[1].value - 5) -lt 1e-6)
             }
         }
+    }
+    if ($Edit) {
+        if (-not $beam) { throw "-Edit needs -SelfTest (it edits the self-test beam)" }
+        function Near($a, $b) { return ($null -ne $a) -and [Math]::Abs([double]$a - [double]$b) -lt 1e-6 }
+        $o = Tool "open_model" @{ path = $beam } 900
+        $e = Tool "set_frame_section" @{ names = @("1"); section = "BEAM"; dry_run = $true }
+        Check "edit dry run, same section: unchanged" ($e -and $e.unchanged -eq 1 -and $e.wouldChange -eq 0)
+        $null = Tool "set_frame_section" @{ names = @("1"); section = "NOPE" } -ExpectError
+        $e = Tool "define_load_pattern" @{ name = "PT"; type = "Live" }
+        Check "define_load_pattern: first edit starts r001 (r000 stays as opened)" ($e -and $e.checkpoint -eq "r001" -and $e.changed -eq 1)
+        $e = Tool "assign_joint_load" @{ names = @("2"); pattern = "PT"; F3 = -20; dry_run = $true }
+        Check "assign_joint_load dry run: would change joint 2" ($e -and $e.wouldChange -eq 1)
+        $e = Tool "assign_joint_load" @{ names = @("2"); pattern = "PT"; F3 = -20 }
+        Check "assign_joint_load: into r001, read back F3 -20" ($e -and $e.checkpoint -eq "r001" -and (Near $e.changes[0].after[0].F3 -20))
+        $r1 = Tool "run_analysis" @{} 900
+        Check "run_analysis: the edited r001 runs in place" ($r1 -and $r1.checkpoint -eq "r001" -and $r1.from -like "edited*")
+        $q = Tool "query_results" @{ kind = "frame"; quantity = "M3"; cases = @("PT"); top_n = 1 }
+        Check "PT 20 kip at midspan: M3 = 100 kip-ft" ($q -and (Near ([Math]::Abs($q.top[0].value)) 100))
+        $e = Tool "set_restraint" @{ names = @("3"); fixed_dofs = @("U1", "U2", "U3", "R1") }
+        Check "set_restraint on a run checkpoint: new r002, r001 keeps its results" ($e -and $e.checkpoint -eq "r002" -and $e.note -like "*r001 keeps*")
+        $e = Tool "assign_frame_load" @{ group = "ALL"; pattern = "PT"; type = "distributed"; dir = "gravity"; value = 1 }
+        Check "assign_frame_load: both frames" ($e -and $e.changed -eq 2 -and $e.checkpoint -eq "r002")
+        $e = Tool "define_combo" @{ name = "C1"; items = @(@{ name = "LIVE"; scale = 1 }, @{ name = "PT"; scale = 2 }) }
+        Check "define_combo C1" ($e -and $e.changed -eq 1)
+        $r2 = Tool "run_analysis" @{} 900
+        $rs = Tool "reactions_summary" @{}
+        $pt = $rs.cases | Where-Object case -eq "PT"; $c1 = $rs.cases | Where-Object case -eq "C1"
+        Check "PT: applied -40 (20 + 1 kip/ft x 20 ft), balanced" ($pt -and (Near $pt.applied.FZ -40) -and $pt.check -eq "balanced")
+        Check "C1 = LIVE + 2 PT: applied -90, balanced" ($c1 -and (Near $c1.applied.FZ -90) -and $c1.check -eq "balanced")
+        $q = Tool "query_results" @{ kind = "frame"; quantity = "M3"; cases = @("PT", "C1"); top_n = 1 }
+        Check "M3: PT 150 (PL/4 + wL^2/8), C1 350" ($q -and (Near ([Math]::Abs(($q.byCase | Where-Object case -eq "PT").value)) 150) -and (Near ([Math]::Abs(($q.byCase | Where-Object case -eq "C1").value)) 350))
+        $e = Tool "move_joints" @{ names = @("2"); delta = @(0, 0, 0.5); dry_run = $true }
+        Check "move_joints dry run" ($e -and $e.wouldChange -eq 1)
+        $e = Tool "add_frame" @{ i = "1"; j = "3"; section = "BEAM"; name = "X1" }
+        Check "add_frame X1: a new checkpoint r003 (r002 was run)" ($e -and $e.changed -eq 1 -and $e.checkpoint -eq "r003")
+        $e = Tool "delete_objects" @{ kind = "frame"; names = @("X1") }
+        Check "delete_objects X1" ($e -and $e.changed -eq 1)
+        $e = Tool "set_frame_release" @{ names = @("1"); i_end = @("M3"); j_end = @() }
+        Check "set_frame_release frame 1: I end M3" ($e -and $e.changed -eq 1 -and $e.changes[0].after -like "I M3*")
+        $e = Tool "set_group" @{ group = "MID"; kind = "joint"; add = @("2") }
+        Check "set_group: MID created with joint 2" ($e -and $e.created -eq "MID")
+        $rv = Tool "revert" @{ checkpoint = "r001" }
+        Check "revert r001: its results are there" ($rv -and ($rv.casesWithResults -contains "PT"))
+        $q = Tool "query_results" @{ kind = "frame"; quantity = "M3"; cases = @("PT"); top_n = 1 }
+        Check "after revert: PT M3 = 100 again, the r001 results" ($q -and (Near ([Math]::Abs($q.top[0].value)) 100))
+        $lc = Tool "list_checkpoints" @{}
+        Check ("list_checkpoints: " + (($lc.checkpoints | ForEach-Object { $_.checkpoint + $(if ($_.held) { "*" } else { "" }) + " edits " + [int]$_.editCount }) -join ", ")) ($lc -and $lc.checkpoints.Count -eq 4 -and ($lc.checkpoints | Where-Object held).checkpoint -eq "r001")
+        $cl = Tool "get_change_log" @{}
+        Check "get_change_log: every applied edit logged" ($cl -and $cl.total -eq 9)
+        $e = Tool "set_restraint" @{ names = @("1"); fixed_dofs = @("U1", "U2", "U3", "R1", "R2", "R3") }
+        Check "an edit after revert starts a new checkpoint (r004), r001 untouched" ($e -and $e.checkpoint -eq "r004")
     }
 } catch {
     Check ("exception: " + $_.Exception.Message) $false

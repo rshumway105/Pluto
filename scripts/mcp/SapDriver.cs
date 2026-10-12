@@ -54,7 +54,9 @@ public sealed class SapDriver : IModelDriver
             "reactions_summary", "base reactions against the applied load summed from the load assignments (static cases, linear additive combos)",
             "compare_runs", "from the per-object envelopes each run_analysis saves",
             "export_viewer", "SapExport -> SapToPluto through Run-Sap.ps1 -Export: .bin + .features.json",
-            "edit_model", "planned (phase 3)");
+            "edit_model", "targeted tools (sections, properties, materials, restraints, releases, loads, patterns, cases, combos, groups, joint moves, frames, deletes), each into a checkpoint, logged, with dry_run",
+            "edit_table", "not available: SAP2000 26.3 refuses edited DatabaseTables (Set / ApplyEditedTables return 1, empty log) and then reads no table until restarted",
+            "revert", "reopens any checkpoint of the session; list_checkpoints, get_change_log");
     }
 
     // Attach to the SAP2000 the user has open; never starts one. Reattaches after SAP is closed and reopened.
@@ -184,33 +186,69 @@ public sealed class SapDriver : IModelDriver
         });
     }
 
-    // Saves the model SAP holds as the next checkpoint <session dir>\rNNN.sdb and runs it there (cases: null =
-    // every case), so neither the opened file nor an earlier checkpoint is written. A model SAP held without
-    // open_model first gets a session of its own (newSessionDir) with r000.sdb as it was. summary: saves the
-    // per-object envelopes (compare_runs) and base reactions to <session dir>\runs\rNNN.
+    // ---------------------------------------------------------------- checkpoints
+
+    // One model state per checkpoint <session dir>\rNNN.sdb; r000 is the model as opened. Edits and runs go into the
+    // latest checkpoint while it has not been run (no runs\rNNN); otherwise (r000, a run checkpoint, an older one
+    // after revert) the model is first saved as the next number, so no earlier state or its results is written.
+    // SAP2000 keeps a run's results with its own file name: saving as a new name copies the model only.
+    // A model SAP held without open_model first gets a session of its own with r000.sdb as it was then.
+    sealed class Checkpoint
+    {
+        public string Dir, Name, File, Adopted, From;
+        public bool Started;   // a new number was saved
+    }
+
+    Checkpoint WorkingCheckpoint(SapSession s, Func<string, string> newSessionDir, string tool)
+    {
+        Checkpoint c = new Checkpoint();
+        string path = s.ModelPath();
+        c.Dir = SessionDirOf(path);
+        if (c.Dir == null)
+        {
+            c.Dir = newSessionDir(path);
+            Directory.CreateDirectory(c.Dir);
+            string r0 = Path.Combine(c.Dir, "r000.sdb");
+            s.SaveAs(r0);
+            WriteSession(c.Dir, path, s.Version(), r0, "SAP2000 held this model when " + tool + " was called; saved here as r000.sdb, the file itself is not written");
+            c.Adopted = path;
+            path = r0;
+        }
+        c.From = Path.GetFileNameWithoutExtension(path);
+        int n = CheckpointNumber(path), latest = NextCheckpoint(c.Dir) - 1;
+        if (n >= 1 && n == latest && !Directory.Exists(Path.Combine(c.Dir, "runs", c.From)))
+        {
+            c.Name = c.From; c.File = path;
+            return c;
+        }
+        c.Name = "r" + (latest + 1).ToString("000", Json.Inv);
+        c.File = Path.Combine(c.Dir, c.Name + ".sdb");
+        s.SaveAs(c.File);
+        c.Started = true;
+        return c;
+    }
+
+    static int CheckpointNumber(string path)
+    {
+        Match m = Regex.Match(Path.GetFileNameWithoutExtension(path ?? ""), @"^r(\d+)$");
+        return m.Success ? int.Parse(m.Groups[1].Value, Json.Inv) : -1;
+    }
+
+    // Runs the analysis on the working checkpoint (cases: null = every case). summary: saves the per-object
+    // envelopes (compare_runs) and base reactions to <session dir>\runs\rNNN.
     public Dictionary<string, object> RunAnalysis(string[] cases, bool summary, Func<string, string> newSessionDir)
     {
         return sta.Invoke("run_analysis", RunTimeout, delegate
         {
             SapSession s = Held();
-            string path = s.ModelPath();
-            string dir = SessionDirOf(path), adopted = null;
-            if (dir == null)
-            {
-                dir = newSessionDir(path);
-                Directory.CreateDirectory(dir);
-                string r0 = Path.Combine(dir, "r000.sdb");
-                s.SaveAs(r0);
-                WriteSession(dir, path, s.Version(), r0, "SAP2000 held this model when run_analysis was called; saved here as r000.sdb, the file itself is not written");
-                adopted = path;
-            }
-            string name = "r" + NextCheckpoint(dir).ToString("000", Json.Inv), cp = Path.Combine(dir, name + ".sdb");
-            s.SaveAs(cp);
+            Checkpoint ck = WorkingCheckpoint(s, newSessionDir, "run_analysis");
+            string dir = ck.Dir, name = ck.Name, cp = ck.File;
             SapRead rd = Reader(s);
             rd.Invalidate();
             SapResults res = new SapResults(s, rd);
-            Dictionary<string, object> r = Json.O("checkpoint", name, "file", cp, "sessionDir", dir);
-            if (adopted != null) r["adopted"] = "SAP2000 held " + adopted + " (not opened through open_model): saved as r000.sdb in a new session first; that file is not written";
+            Dictionary<string, object> r = Json.O("checkpoint", name, "file", cp, "sessionDir", dir,
+                "from", ck.Started ? "saved from " + ck.From : "edited state of " + name + ", run in place");
+            if (ck.Adopted != null) r["adopted"] = "SAP2000 held " + ck.Adopted + " (not opened through open_model): saved as r000.sdb in a new session first; that file is not written";
             Dictionary<string, object> run;
             try { run = res.Run(cases); }
             catch (ArgumentException e) { throw new ToolError(e.Message); }
@@ -247,6 +285,78 @@ public sealed class SapDriver : IModelDriver
             r["units"] = s.Units();
             r["note"] = "SAP2000 now holds " + name + ".sdb with its results. Next: reactions_summary, query_results; compare_runs after another run.";
             return r;
+        });
+    }
+
+    // ---------------------------------------------------------------- edits (phase 3)
+
+    const int ReplyChanges = 50, LogChanges = 2000;
+
+    // An edit of the model SAP holds, on the STA thread. Applied (not dryRun): into the working checkpoint (unlocked
+    // first: SAP2000 refuses edits to a model with results), the SAP2000 view refreshed, the object index reset, and
+    // a line appended to <session dir>\changes.jsonl (tool, arguments, changes). The reply lists at most 50 changes.
+    public Dictionary<string, object> Edit(string tool, Dictionary<string, object> args, bool dryRun,
+        Func<SapRead, SapEdit, Dictionary<string, object>> fn, Func<string, string> newSessionDir)
+    {
+        return sta.Invoke(tool, ResultsTimeout, delegate
+        {
+            SapSession s = Held();
+            SapRead rd = Reader(s);
+            Checkpoint ck = null;
+            bool unlocked = false;
+            if (!dryRun)
+            {
+                ck = WorkingCheckpoint(s, newSessionDir, tool);
+                if (s.Model.GetModelIsLocked()) { s.Model.SetModelIsLocked(false); unlocked = true; }
+                rd.Invalidate();
+            }
+            Dictionary<string, object> r;
+            try { r = fn(rd, new SapEdit(s, rd)); }
+            catch (ArgumentException e) { throw new ToolError(e.Message); }
+            finally { if (!dryRun) rd.Invalidate(); }
+            r["dryRun"] = dryRun;
+            List<object> changes = r.ContainsKey("changes") ? r["changes"] as List<object> : null;
+            if (!dryRun)
+            {
+                s.Model.View.RefreshView(0, false);
+                List<object> logged = changes == null || changes.Count <= LogChanges ? changes : changes.GetRange(0, LogChanges);
+                Dictionary<string, object> line = Json.O("utc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv), "checkpoint", ck.Name,
+                    "tool", tool, "args", args, "edit", r.ContainsKey("edit") ? r["edit"] : null, "changed", changes == null ? 0 : changes.Count, "changes", logged);
+                if (r.ContainsKey("failed")) line["failed"] = r["failed"];
+                File.AppendAllText(Path.Combine(ck.Dir, "changes.jsonl"), Json.Write(line) + "\n");
+                log.Info(tool + " -> " + ck.Name + " (" + (changes == null ? 0 : changes.Count) + " changes)");
+                r["checkpoint"] = ck.Name;
+                r["file"] = ck.File;
+                string note = ck.Started ? "saved " + ck.From + " as " + ck.Name + " first; " + ck.From + " keeps its state and results. " : "";
+                if (unlocked) note += "The model's results were cleared by the edit (the run checkpoints keep theirs). ";
+                r["note"] = note + "run_analysis runs " + ck.Name + "; revert goes back.";
+                if (ck.Adopted != null) r["adopted"] = "SAP2000 held " + ck.Adopted + " (not opened through open_model): saved as r000.sdb in a new session first";
+            }
+            else r["note"] = "dry run: nothing changed" + (s.Model.GetModelIsLocked() ? "; applying it clears the model's results (the run checkpoint keeps them)" : "");
+            if (changes != null && changes.Count > ReplyChanges) { r["changes"] = changes.GetRange(0, ReplyChanges); r["changesListed"] = ReplyChanges; }
+            return r;
+        });
+    }
+
+    // Opens checkpoint rNNN of the current session (or of sessionDir) in SAP2000. Its results, if it was run, are
+    // queryable again; the next edit or run starts a new checkpoint, so rNNN stays as it is.
+    public Dictionary<string, object> Revert(string checkpoint, string sessionDir)
+    {
+        return sta.Invoke("revert", Long, delegate
+        {
+            SapSession s = Attached();
+            string dir = sessionDir ?? SessionDirOf(s.ModelPath());
+            if (dir == null) throw new ToolError("SAP2000 holds no Pluto session model: open_model first (or give session_dir)");
+            string file = Path.Combine(dir, checkpoint + ".sdb");
+            if (CheckpointNumber(file) < 0 || !File.Exists(file)) throw new ToolError("no checkpoint '" + checkpoint + "' in " + dir + " (list_checkpoints)");
+            string before = s.ModelPath();
+            s.Open(file, false);
+            reader = null;
+            List<string> done = new List<string>();
+            foreach (KeyValuePair<string, int> kv in s.CaseStatus()) if (kv.Value == 4) done.Add(kv.Key);
+            log.Info("revert -> " + file);
+            return Json.O("checkpoint", checkpoint, "file", file, "replaced", before, "casesWithResults", done,
+                "note", (done.Count > 0 ? "its results are available to query_results. " : "") + "The next edit or run_analysis saves a new checkpoint; " + checkpoint + " stays as it is.");
         });
     }
 

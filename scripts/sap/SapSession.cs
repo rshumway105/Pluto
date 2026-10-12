@@ -202,6 +202,7 @@ public class SapSession
         List<Dictionary<string, string>> rows = new List<Dictionary<string, string>>();
         object db = DbTables();
         if (db == null) return rows;
+        SelectAllForDisplay();
         Type it = typeof(cSapModel).Assembly.GetType("SAP2000v1.cDatabaseTables");
         System.Reflection.MethodInfo mi = it == null ? null : it.GetMethod("GetTableForDisplayArray");
         if (mi == null) return rows;
@@ -218,6 +219,26 @@ public class SapSession
             rows.Add(d);
         }
         return rows;
+    }
+
+    // Load tables (pattern, case and combination definitions and the loads per pattern) list only the patterns, cases
+    // and combinations selected for display, and through the API none is selected: "Load Pattern Definitions" read
+    // back 0 rows while it held data (SAP 26.3, 2026-10-12). Selects all of them, for reading and editing tables.
+    public void SelectAllForDisplay()
+    {
+        object db = DbTables();
+        if (db == null) return;
+        Type it = typeof(cSapModel).Assembly.GetType("SAP2000v1.cDatabaseTables");
+        int n = 0; string[] pats = null, combos = null;
+        Model.LoadPatterns.GetNameList(ref n, ref pats);
+        n = 0; Model.RespCombo.GetNameList(ref n, ref combos);
+        string[][] lists = { pats ?? new string[0], LoadCases(), combos ?? new string[0] };
+        string[] setters = { "SetLoadPatternsSelectedForDisplay", "SetLoadCasesSelectedForDisplay", "SetLoadCombinationsSelectedForDisplay" };
+        for (int k = 0; k < setters.Length; k++)
+        {
+            System.Reflection.MethodInfo mi = it == null ? null : it.GetMethod(setters[k]);
+            if (mi != null && lists[k].Length > 0) mi.Invoke(db, new object[] { lists[k] });
+        }
     }
 
     // Input tables that hold data in this model, as { key, name } (GetAllTables, IsEmpty false); null without

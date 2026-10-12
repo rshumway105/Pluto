@@ -262,3 +262,40 @@ self-test beam through the tools: M3 50 kip-ft, applied FZ −10 against reactio
 Not yet tried: other case types (response spectrum, time history: reported unchecked), combos (the example tank has
 none), models with edge pressures or auto lateral loads, run time on a large model against the client's tool
 timeout. Saved selections are still not viewer groups.
+
+## Phase 3 status (2026-10-12)
+
+Built and tested on the development machine (SAP2000 26.3.0), server 0.4.0. Edit code is controller code,
+`scripts/sap/SapEdit.cs` (object API, each edit returns before -> after, `dryRun` applies nothing); checkpoints, the
+change log and revert are in `SapDriver`, the tools in `Tools.cs`.
+
+**Checkpoints, as built:** one model state per `rNNN.sdb`. An edit or run goes into the latest checkpoint while it has
+not been run (no `runs\rNNN`); otherwise (r000, a run checkpoint, an older one after `revert`) the model is first saved
+as the next number. Saving under a new name copies the model only, so every run checkpoint keeps its results, and a
+reverted run checkpoint's results can be queried again. An edit unlocks the model (SAP2000 refuses edits to a model
+with results) and says so. Every applied edit appends a line to `<session dir>\changes.jsonl` (time, checkpoint, tool,
+arguments, changes up to 2000).
+
+| tools | notes |
+|---|---|
+| `set_frame_section`, `set_area_section`, `set_link_property` | targets: names, group and / or saved selection; unknown section → error with similar names |
+| `set_material_property` | E, nu, alpha (isotropic), weight per volume, Fy / Fu (steel), fc (concrete); only the values given change |
+| `set_restraint`, `set_frame_release` | DOF lists (`[U1, U2, U3]` pinned); releases replace the frame's, SAP2000 refuses unstable sets (reported as failed) |
+| `assign_joint_load`, `assign_frame_load`, `assign_area_load` | replace (default) / add / clear per pattern; frame distributed (trapezoid, relative or absolute) or point, force or moment; directions by name (local1…, X, X_projected, gravity); after = read back from SAP2000 |
+| `define_load_pattern`, `define_load_case`, `define_combo` | new or redefined; linear / nonlinear static cases with loads and initial case; combos linear, envelope, absolute, srss, range |
+| `set_group`, `move_joints`, `add_frame`, `delete_objects` | group add / remove / from a selection or group (created when missing); move by delta or to a point; frame by joints or points; delete frames / areas / links (joints go with their last object) |
+| `revert`, `list_checkpoints`, `get_change_log` | reopen any checkpoint; per checkpoint: saved, run (case status, equilibrium), edits, which one SAP2000 holds |
+
+**`edit_table` is not built.** On SAP2000 26.3 `SetTableForEditingArray` / `ApplyEditedTables` return 1 with an empty
+import log even for an unchanged round trip, and afterwards `GetTableForDisplayArray` returns no rows for any table
+(across model opens and `CancelTableEditing`) until SAP2000 restarts. Found while building it; recorded in
+[[vault/arms/sap-controller|sap-controller]]. Also found: load tables need every pattern / case / combo selected for
+display (`SapSession.SelectAllForDisplay`, now in `TableRows`), else `read_table` gives 0 rows for them.
+
+Verified (`Test-PlutoMcp.ps1 -SelfTest -Edit`, 84 checks, on the self-test beam through the tools): new pattern PT
+with 20 kip at midspan → M3 100 kip-ft; a pin instead of the roller and 1 kip/ft on both frames → PT applied −40 kip
+balanced, M3 150 (PL/4 + wL²/8); combo C1 = LIVE + 2 PT → applied −90 balanced, M3 350; edits after a run start a new
+checkpoint; revert to r001 gives its M3 100 again; the change log holds every applied edit; dry runs change nothing.
+
+Not yet tried: the edit tools on a large model or through Claude Desktop; `set_material_property` and area loads by
+hand values; a model whose load cases are not static (case definitions other than static are not edited).
