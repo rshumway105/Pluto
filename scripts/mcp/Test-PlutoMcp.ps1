@@ -2,9 +2,11 @@
 # (through Start-PlutoMcp.ps1, or the exe with -Direct), sends initialize / initialized / tools/list /
 # tools/call status [/ self_test] [/ the read tools on -Model], checks every reply, prints them.
 # Exit 0 = all checks passed. -Model opens that file in the running SAP2000 (replacing what it holds) as a
-# working copy and runs every phase 1 tool on it; replies are printed cut to -Show characters.
-#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-SelfTest] [-Model <sdb|s2k>] [-Show 600]
-param([switch]$Direct, [switch]$SelfTest, [string]$Model, [int]$Show = 600)
+# working copy and runs every phase 1 tool on it; -Run adds the phase 2 tools (two runs, results, reactions,
+# compare, viewer export), and with -SelfTest also opens the self-test beam and checks its hand values through
+# them. Replies are printed cut to -Show characters.
+#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-SelfTest] [-Model <sdb|s2k> [-Run]] [-Show 600]
+param([switch]$Direct, [switch]$SelfTest, [string]$Model, [switch]$Run, [int]$Show = 600)
 $ErrorActionPreference = "Stop"
 $psi = New-Object Diagnostics.ProcessStartInfo
 if ($Direct) {
@@ -66,11 +68,13 @@ try {
     $r = Call 5 "nonexistent/method" @{} 30
     Check "unknown method: -32601" ($r.error.code -eq -32601)
 
+    $beam = $null
     if ($SelfTest) {
         $r = Call 6 "tools/call" @{ name = "self_test"; arguments = @{} } 900
         $text = $r.result.content[0].text
         Write-Output "        $text"
         Check "self_test: passed" ((-not $r.result.isError) -and ($text | ConvertFrom-Json).passed -eq $true)
+        if (-not $r.result.isError) { $beam = ($text | ConvertFrom-Json).model }
     }
 
     if ($Model) {
@@ -130,6 +134,43 @@ try {
         Check "read_table Joint Coordinates: one row per joint" ($jc -and $jc.total -eq $d.objects.joints)
         $f1 = Tool "read_table" @{ name = "Joint Coordinates"; filter = @{ Joint = $jc.rows[0].Joint }; to_file = $true }
         Check "read_table filter: one row, written to a file" ($f1 -and $f1.total -eq 1 -and (Test-Path $f1.file))
+
+        if ($Run) {
+            $r1 = Tool "run_analysis" @{} 3600
+            Check "run_analysis: a checkpoint rNNN.sdb, every case reported" ($r1 -and $r1.file -like "*\r0*.sdb" -and $r1.cases.Count -gt 0)
+            $rs = Tool "reactions_summary" @{}
+            $checks = @($rs.cases | ForEach-Object check)
+            Check ("reactions_summary: " + (($rs.cases | ForEach-Object { "$($_.case) $($_.check)" }) -join "; ")) ($rs -and ($checks -contains "balanced") -and -not ($checks -like "OFF*"))
+            $m3 = Tool "query_results" @{ kind = "frame"; quantity = "M3"; top_n = 3 }
+            Check "query_results frame M3: top 1 = the larger of |max| and |min|" ($m3 -and [Math]::Abs($m3.top[0].value) -eq [Math]::Max([Math]::Abs($m3.max.value), [Math]::Abs($m3.min.value)))
+            $u = Tool "query_results" @{ kind = "joint"; quantity = "U"; top_n = 3; to_file = $true }
+            Check "query_results joint U: every joint, rows written to a file" ($u -and $u.objects -eq $d.objects.joints -and (Test-Path $u.file))
+            $sv = Tool "query_results" @{ kind = "area_stress"; quantity = "SVMTop"; top_n = 3; by_group = @("*") }
+            Check "query_results area_stress SVMTop by_group: one summary per group" ($sv -and $sv.byGroup.Count -eq $d.groups.Count)
+            $null = Tool "query_results" @{ kind = "reaction"; quantity = "F3"; top_n = 3; envelope = $false; sort = "min" }
+            $null = Tool "query_results" @{ kind = "frame"; quantity = "Q9" } -ExpectError
+            $r2 = Tool "run_analysis" @{} 3600
+            Check "run_analysis again: the next checkpoint" ($r2 -and $r2.checkpoint -ne $r1.checkpoint)
+            $runs = Tool "compare_runs" @{}
+            Check "compare_runs list: both runs" ($runs -and ($runs.runs -contains $r1.checkpoint) -and ($runs.runs -contains $r2.checkpoint))
+            $cmp = Tool "compare_runs" @{ kind = "joint"; quantity = "U3"; top_n = 3 }
+            Check "compare_runs joint U3: same model, nothing changed" ($cmp -and $cmp.compared -gt 0 -and $cmp.changed -eq 0)
+            $ex = Tool "export_viewer" @{} 1800
+            Check "export_viewer: .bin and .features.json written" ($ex -and (Test-Path $ex.bin) -and (Test-Path $ex.features))
+
+            if ($beam) {
+                # the self-test beam by hand: 20 ft, 10 kip at midspan -> reactions 5 + 5 kip up, M3 50 kip-ft
+                $null = Tool "open_model" @{ path = $beam } 900
+                $null = Tool "run_analysis" @{} 900
+                $bm = Tool "query_results" @{ kind = "frame"; quantity = "M3"; top_n = 1 }
+                Check "beam: max |M3| = 50 kip-ft" ($bm -and [Math]::Abs([Math]::Abs($bm.top[0].value) - 50) -lt 1e-6)
+                $br = Tool "reactions_summary" @{}
+                $c = $br.cases | Where-Object case -eq "LIVE"
+                Check "beam: applied FZ -10, reaction FZ +10, balanced" ($c -and [Math]::Abs($c.applied.FZ + 10) -lt 1e-9 -and [Math]::Abs($c.reaction.FZ - 10) -lt 1e-6 -and $c.check -eq "balanced")
+                $rq = Tool "query_results" @{ kind = "reaction"; quantity = "F3"; top_n = 2 }
+                Check "beam: two supports at 5 kip" ($rq -and $rq.top.Count -eq 2 -and [Math]::Abs($rq.top[0].value - 5) -lt 1e-6 -and [Math]::Abs($rq.top[1].value - 5) -lt 1e-6)
+            }
+        }
     }
 } catch {
     Check ("exception: " + $_.Exception.Message) $false

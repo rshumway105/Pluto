@@ -19,6 +19,7 @@ This is the only route that runs on the production machine (SAP 22, no Python). 
 |---|---|
 | `SapSession.cs` | the controller: attach / start / new instance, open (`.sdb` or `.s2k` import), save as, run, run on a copy, case status, load cases, groups, counts, area local axes, input tables read back (`TableRows`, `WriteTablesS2k`), results → `.s2k` (`WriteResultsS2k`), self-test beam |
 | `SapRead.cs` | read-only views as JSON-ready dictionaries, for the [[vault/decisions/2026-10-12-llm-model-interface\|Pluto MCP server]]: object index (cached per model state), describe, list / one object in full, sections, materials, cases, combos, selection by geometry and attributes (+ GUI selection), levels, input tables. Uses a `SapSession` |
+| `SapResults.cs` | results as JSON-ready dictionaries, for the MCP server: run with the analysis log's warnings, result rows at full precision (`Results.*`), top-N / envelope / per-case / per-group queries, base reactions against the applied load summed from the load assignments, per-run envelopes (TSV) and their comparison. Uses a `SapSession` and a `SapRead` |
 | `SapExport.cs` | whatever SAP holds → analysis mesh (`Mesh`, renumbered 1..N) → `model.s2k` + `labels.csv` for `SapToPluto` |
 | `SapSurvey.cs` | read-only survey of a model (materials, sections, frames, links, joints, patterns, cases, combos, groups → TSVs), expansion-joint candidates, force export by group, the axis probe. Derives from `SapSession` |
 | `SapRelease.cs` | HVAC link / direct release models, the synthetic duct test model. Uses a `SapSurvey` |
@@ -38,8 +39,9 @@ This is the only route that runs on the production machine (SAP 22, no Python). 
 | input tables read back (display precision); by group; which tables hold data | `TableRows`, `WriteTablesS2k`, `AvailableTables` | `-Tables "a;b" -TablesOut <s2k>` | `offset_study.py` (insertion points, gap props), MCP `read_table` |
 | model overview: units, counts, extent, supports, properties with use counts, groups, patterns, cases, combos | `SapRead.Describe` | `-Describe <json>` | MCP `describe_model` |
 | list objects, one object in full, sections, materials, cases, combos, select by geometry / attributes, levels | `SapRead` | (MCP server only) | MCP phase 1 tools |
+| run chosen cases (+ their initial cases), report status and log warnings; query results (top N, controlling case, per group); base reactions vs applied load; per-run envelopes, compare two runs | `SapResults` | (MCP server only) | MCP `run_analysis`, `query_results`, `reactions_summary`, `compare_runs` |
 | results at full precision: joints, shells (forces + face stresses), frames, links | `WriteResultsS2k` | `-Results <s2k>` | tank `results.s2k` |
-| model → viewer: mesh, model + results `.s2k`, `SapToPluto` | `SapExport` | `-Export <base\|folder> [-NoResults] [-FinalOnly] [-Cylindrical] [-NoViewerFile]` | `export_model.py` |
+| model → viewer: mesh, model + results `.s2k`, `SapToPluto` | `SapExport` | `-Export <base\|folder> [-NoResults] [-FinalOnly] [-Cylindrical] [-NoViewerFile]` | `export_model.py`, MCP `export_viewer` |
 | survey, candidates, forces by group, axis probe | `SapSurvey` | `Run-SapSurvey.ps1` | duct workflow |
 | link / direct release models, synthetic duct | `SapRelease` | `Run-SapRelease.ps1` | duct workflow |
 | self test: 20 ft beam, 10 kip midspan → 5 kip, 50 kip-ft | `WriteTestBeamS2k` | `-SelfTest <dir>` | install check |

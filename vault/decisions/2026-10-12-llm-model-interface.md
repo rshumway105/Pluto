@@ -238,3 +238,27 @@ dropped as a target.
 Not yet tried: a large model (index time; seconds per 10k objects expected from 0.4 s for 2.8k), a model with
 combos and frame sections of every type, and the tools from Claude Code itself (this session's client was not
 started in the repo, so `.mcp.json` was not loaded; the protocol test drove the server).
+
+## Phase 2 status (2026-10-12)
+
+Built and tested on the development machine (SAP2000 26.3.0), server 0.3.0. Results code is controller code,
+`scripts/sap/SapResults.cs` (on a `SapSession` and a `SapRead`); checkpoints and run summaries are in
+`SapDriver.RunAnalysis`, the tools in `Tools.cs`.
+
+| tool | notes |
+|---|---|
+| `run_analysis(cases?)` | saves `<session dir>\rNNN.sdb` (next number; r000 stays the opened model) and runs there; `cases` also flags the initial cases they continue from. A model SAP held without `open_model` gets a session of its own first (r000 = its state then). Reply: case status, WARNING / ERROR / instability lines of SAP's `.LOG` (all-clear lines dropped), equilibrium per case, largest value of every quantity. Saves `runs\rNNN\<kind>.tsv` envelopes + `summary.json`, and a line in `runs.jsonl` |
+| `query_results` | kinds joint (U1–R3, U), reaction, frame, area (forces), area_stress, link; `Results.*` with the case / combo selected for output; nonlinear and multi-step static: last step (`SetOption…Static(3)`). Top N by magnitude / max / min, envelope per object (controlling case and station / joint), max / min, worst per case, `by_group` (wildcards, ≤ 100), filters group / selection / name, `to_file` (TSV in `<work>\results`) |
+| `reactions_summary` | `BaseReact` per case / combo against the applied load summed from the assignments: self weight (frame A × L × weight per volume × modifiers, shell membrane thickness × area, link weight), joint forces, frame distributed / point / gravity loads (local, global, projected), area uniform / uniform-to-frame / gravity loads, face pressures (joint pattern: corner mean × area; top face pushes along −3, bottom along +3). Linear and nonlinear static cases (with their initial case), linear additive combos. Default tolerance 0.5 % |
+| `compare_runs(a?, b?)` | from the saved envelopes: per object and case, b − a of one quantity, top N; changes below 1e-9 of the largest magnitude are noise (a nonlinear rerun differs by ~1e-14). Without kind: lists the runs |
+| `export_viewer` | runs `Run-Sap.ps1 -KeepOpen -Export <session dir>\viewer\rNNN` as a child process (the lib needs Excel interop, so `SapToPluto` is not compiled into the exe); `.bin`, `.features.json`, model / results `.s2k`, log |
+
+Verified (`Test-PlutoMcp.ps1 -SelfTest -Run -Model <tank>`, through `Start-PlutoMcp.ps1`, 132 checks): on the example
+tank every case balances: DEAD residual 1e-10 of 214 kip, HYDRO / NL_HYDRO / NL_SETTLE 6e-4 of 7021 / 7236 kip (the
+corner-mean pressure); two runs of the same model compare as unchanged; the export writes the `.bin`. On the
+self-test beam through the tools: M3 50 kip-ft, applied FZ −10 against reaction +10, two supports at 5 kip.
+`Build-PlutoMcp.ps1` now moves a locked exe aside (a running client holds it) instead of failing.
+
+Not yet tried: other case types (response spectrum, time history: reported unchecked), combos (the example tank has
+none), models with edge pressures or auto lateral loads, run time on a large model against the client's tool
+timeout. Saved selections are still not viewer groups.

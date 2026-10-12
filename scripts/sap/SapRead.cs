@@ -948,7 +948,7 @@ public class SapRead
 
     // ---------------------------------------------------------------- helpers
 
-    static Dictionary<string, object> O(params object[] kv)
+    public static Dictionary<string, object> O(params object[] kv)
     {
         Dictionary<string, object> d = new Dictionary<string, object>();
         for (int i = 0; i + 1 < kv.Length; i += 2) d[(string)kv[i]] = kv[i + 1];

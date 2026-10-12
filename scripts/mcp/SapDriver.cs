@@ -49,8 +49,11 @@ public sealed class SapDriver : IModelDriver
             "describe_levels", "from joint Z clusters, grid Z lines and level-named groups (SAP2000 has no stories)",
             "read_table", HasTables() ? (object)true : "not available: this SAP2000 API has no DatabaseTables",
             "gui_display_control", "not available: the OAPI only refreshes the view; results are shown in the Pluto viewer (phase 4)",
-            "run_analysis", "planned (phase 2)",
-            "query_results", "planned (phase 2)",
+            "run_analysis", "on a new checkpoint rNNN.sdb in the session dir; the opened file is never written",
+            "query_results", "full precision (Results.*): joint, reaction, frame, area, area_stress, link; nonlinear / multi-step static: last step",
+            "reactions_summary", "base reactions against the applied load summed from the load assignments (static cases, linear additive combos)",
+            "compare_runs", "from the per-object envelopes each run_analysis saves",
+            "export_viewer", "SapExport -> SapToPluto through Run-Sap.ps1 -Export: .bin + .features.json",
             "edit_model", "planned (phase 3)");
     }
 
@@ -125,16 +128,139 @@ public sealed class SapDriver : IModelDriver
     // A read on the model SAP holds, on the STA thread. Reads never change the model.
     public T Read<T>(string what, Func<SapRead, T> fn)
     {
-        return sta.Invoke(what, ReadTimeout, delegate
+        return sta.Invoke(what, ReadTimeout, delegate { return fn(Reader(Held())); });
+    }
+
+    static readonly TimeSpan ReadTimeout = TimeSpan.FromMinutes(5), ResultsTimeout = TimeSpan.FromMinutes(15), RunTimeout = TimeSpan.FromMinutes(60);
+
+    SapSession Held()
+    {
+        SapSession s = Attached();
+        if (string.IsNullOrEmpty(s.ModelPath())) throw new ToolError("SAP2000 holds no model: open one with open_model");
+        return s;
+    }
+
+    SapRead Reader(SapSession s)
+    {
+        if (reader == null || readerFor != s) { reader = new SapRead(s); readerFor = s; }
+        return reader;
+    }
+
+    // Session dir of a model file: the folder holding session.json (open_model or run_analysis made it), else null.
+    public static string SessionDirOf(string modelPath)
+    {
+        if (string.IsNullOrEmpty(modelPath)) return null;
+        string dir = Path.GetDirectoryName(modelPath);
+        return dir != null && File.Exists(Path.Combine(dir, "session.json")) ? dir : null;
+    }
+
+    static void WriteSession(string dir, string original, string version, string copy, string note)
+    {
+        Dictionary<string, object> d = Json.O("original", original);
+        if (File.Exists(original))
         {
-            SapSession s = Attached();
-            if (string.IsNullOrEmpty(s.ModelPath())) throw new ToolError("SAP2000 holds no model: open one with open_model");
-            if (reader == null || readerFor != s) { reader = new SapRead(s); readerFor = s; }
-            return fn(reader);
+            d["originalBytes"] = new FileInfo(original).Length;
+            d["originalModifiedUtc"] = File.GetLastWriteTimeUtc(original).ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv);
+        }
+        d["openedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv);
+        d["sapVersion"] = version; d["workingCopy"] = copy;
+        if (note != null) d["note"] = note;
+        File.WriteAllText(Path.Combine(dir, "session.json"), Json.Write(d));
+    }
+
+    // ---------------------------------------------------------------- run and results (phase 2)
+
+    public const double DefaultTolerance = 0.005;
+
+    // Results of the model SAP holds, on the STA thread (also reads).
+    public T Results<T>(string what, Func<SapRead, SapResults, T> fn)
+    {
+        return sta.Invoke(what, ResultsTimeout, delegate
+        {
+            SapSession s = Held();
+            SapRead r = Reader(s);
+            try { return fn(r, new SapResults(s, r)); }
+            catch (ArgumentException e) { throw new ToolError(e.Message); }
         });
     }
 
-    static readonly TimeSpan ReadTimeout = TimeSpan.FromMinutes(5);
+    // Saves the model SAP holds as the next checkpoint <session dir>\rNNN.sdb and runs it there (cases: null =
+    // every case), so neither the opened file nor an earlier checkpoint is written. A model SAP held without
+    // open_model first gets a session of its own (newSessionDir) with r000.sdb as it was. summary: saves the
+    // per-object envelopes (compare_runs) and base reactions to <session dir>\runs\rNNN.
+    public Dictionary<string, object> RunAnalysis(string[] cases, bool summary, Func<string, string> newSessionDir)
+    {
+        return sta.Invoke("run_analysis", RunTimeout, delegate
+        {
+            SapSession s = Held();
+            string path = s.ModelPath();
+            string dir = SessionDirOf(path), adopted = null;
+            if (dir == null)
+            {
+                dir = newSessionDir(path);
+                Directory.CreateDirectory(dir);
+                string r0 = Path.Combine(dir, "r000.sdb");
+                s.SaveAs(r0);
+                WriteSession(dir, path, s.Version(), r0, "SAP2000 held this model when run_analysis was called; saved here as r000.sdb, the file itself is not written");
+                adopted = path;
+            }
+            string name = "r" + NextCheckpoint(dir).ToString("000", Json.Inv), cp = Path.Combine(dir, name + ".sdb");
+            s.SaveAs(cp);
+            SapRead rd = Reader(s);
+            rd.Invalidate();
+            SapResults res = new SapResults(s, rd);
+            Dictionary<string, object> r = Json.O("checkpoint", name, "file", cp, "sessionDir", dir);
+            if (adopted != null) r["adopted"] = "SAP2000 held " + adopted + " (not opened through open_model): saved as r000.sdb in a new session first; that file is not written";
+            Dictionary<string, object> run;
+            try { run = res.Run(cases); }
+            catch (ArgumentException e) { throw new ToolError(e.Message); }
+            foreach (KeyValuePair<string, object> kv in run) r[kv.Key] = kv.Value;
+            log.Info("run_analysis " + cp + " (" + run["seconds"] + " s)");
+            if (summary)
+            {
+                Stopwatch sw = Stopwatch.StartNew();
+                string runDir = Path.Combine(dir, "runs", name);
+                try
+                {
+                    Dictionary<string, object> maxima = res.SaveEnvelopes(runDir, null);
+                    Dictionary<string, object> react = res.Reactions(null, DefaultTolerance);
+                    string file = Path.Combine(runDir, "summary.json");
+                    File.WriteAllText(file, Json.Write(Json.O("checkpoint", name, "file", cp, "utc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv),
+                        "units", s.Units(), "run", run, "maxima", maxima, "reactions", react)));
+                    List<object> eq = new List<object>();
+                    object cl;
+                    if (react.TryGetValue("cases", out cl))
+                        foreach (object o in (List<object>)cl)
+                        {
+                            Dictionary<string, object> d = (Dictionary<string, object>)o;
+                            eq.Add(Json.O("case", d["case"], "step", d["step"], "check", d["check"]));
+                        }
+                    r["equilibrium"] = eq;
+                    r["maxima"] = maxima;
+                    r["summary"] = file;
+                }
+                catch (Exception e) { log.Error("run summary", e); r["summaryError"] = e.Message; }
+                r["summarySeconds"] = Math.Round(sw.Elapsed.TotalSeconds, 1);
+            }
+            File.AppendAllText(Path.Combine(dir, "runs.jsonl"), Json.Write(Json.O("checkpoint", name, "utc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv),
+                "cases", cases, "seconds", run["seconds"], "notFinished", run.ContainsKey("notFinished") ? run["notFinished"] : null)) + "\n");
+            r["units"] = s.Units();
+            r["note"] = "SAP2000 now holds " + name + ".sdb with its results. Next: reactions_summary, query_results; compare_runs after another run.";
+            return r;
+        });
+    }
+
+    // Next free checkpoint number in a session dir (r000 is the opened model).
+    static int NextCheckpoint(string dir)
+    {
+        int next = 1;
+        foreach (string f in Directory.GetFiles(dir, "r*.sdb"))
+        {
+            Match m = Regex.Match(Path.GetFileNameWithoutExtension(f), @"^r(\d+)$");
+            if (m.Success) next = Math.Max(next, int.Parse(m.Groups[1].Value, Json.Inv) + 1);
+        }
+        return next;
+    }
 
     // Opens path in the attached SAP2000 (replacing what it holds) and at once saves it as the working copy
     // <session dir>\r000.sdb, so every later save, run or edit writes the copy and never the original (plan § 3).
@@ -155,11 +281,7 @@ public sealed class SapDriver : IModelDriver
             s.SaveAs(copy);
             reader = null;
             int[] c = s.Counts();
-            File.WriteAllText(Path.Combine(sessionDir, "session.json"), Json.Write(Json.O(
-                "original", path, "originalBytes", new FileInfo(path).Length,
-                "originalModifiedUtc", File.GetLastWriteTimeUtc(path).ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv),
-                "openedUtc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv),
-                "sapVersion", s.Version(), "workingCopy", copy)));
+            WriteSession(sessionDir, path, s.Version(), copy, null);
             log.Info("open_model " + path + " -> " + copy);
             Dictionary<string, object> r = Json.O(
                 "original", path, "workingCopy", s.ModelPath(), "sessionDir", sessionDir,

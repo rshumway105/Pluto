@@ -151,6 +151,75 @@ public sealed class ToolSet
                 "limit", Prop("integer", "Rows (default 200, max 2000)."),
                 "to_file", Prop("boolean", "Also write every matching row to a TSV in the work dir and return its path.")),
             ReadTable);
+
+        // ------------------------------------------------ phase 2: run and query results
+
+        Add("run_analysis",
+            "Runs the analysis on a new checkpoint: saves the model SAP2000 holds as <session dir>\\rNNN.sdb and runs it " +
+            "there, so the opened file and earlier checkpoints keep their state and results. Reports each case's status, " +
+            "the warnings / errors of SAP2000's analysis log, the equilibrium check per case, and the largest value of " +
+            "every result quantity. Saves per-object envelopes for compare_runs. Can take minutes on large models; " +
+            "confirm with the user before a long run.",
+            Schema("cases", Json.O("type", "array", "items", Json.O("type", "string"),
+                    "description", "Only these load cases (and the initial cases they continue from). Default: every case."),
+                "summary", Prop("boolean", "Save envelopes and reactions for compare_runs / the reply (default true).")),
+            RunAnalysis);
+
+        Add("query_results",
+            "Analysis results at full precision: the top N (largest magnitude by default), the controlling case and " +
+            "location, max / min, the worst per case and optionally per group. kind and its quantities: joint (U1 U2 U3 R1 " +
+            "R2 R3, U = translation magnitude), reaction (F1 F2 F3 M1 M2 M3), frame (P V2 V3 T M2 M3, along each frame), " +
+            "area (F11 F22 F12 FMax FMin FVM M11 M22 M12 MMax MMin V13 V23 VMax per unit length, at corner joints), " +
+            "area_stress (S11Top S22Top S12Top SMaxTop SMinTop SVMTop, the same ...Bot, S13Avg S23Avg SMaxAvg), link (P V2 V3 T " +
+            "M2 M3 at each end). Local axes as SAP2000 defines them; units as reported. Default cases: every finished case " +
+            "and every combination; nonlinear / multi-step static cases give their last step. Read only.",
+            Schema(new[] { "kind", "quantity" },
+                "kind", Enum("Result kind.", SapResults.ResultKinds),
+                "quantity", Prop("string", "One quantity of that kind, e.g. M3, SVMTop, U3, F3."),
+                "cases", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Load cases / combinations, * and ? wildcards."),
+                "group", Prop("string", "Only objects of this SAP2000 group."),
+                "selection", Prop("string", "Only objects of a selection saved by select_objects."),
+                "name", Prop("string", "Only objects whose name matches (* and ? wildcards)."),
+                "top_n", Prop("integer", "How many to list (default 20, max 500)."),
+                "envelope", Prop("boolean", "true (default): one entry per object, at its controlling case and location; false: individual rows."),
+                "sort", Enum("abs (default): largest magnitude; max: most positive; min: most negative.", new[] { "abs", "max", "min" }),
+                "by_group", Json.O("type", "array", "items", Json.O("type", "string"),
+                    "description", "Also summarise per group: these group names, or [\"*\"] for every group (max 100)."),
+                "to_file", Prop("boolean", "Also write every matching row to a TSV in the work dir and return its path.")),
+            QueryResults);
+
+        Add("reactions_summary",
+            "Equilibrium check: per case / combination, the base reactions (total FX FY FZ, MX MY MZ about the base point) " +
+            "against the applied load summed from the model's load assignments (self weight, joint, frame and area loads, face " +
+            "pressures, case and linear combination factors). 'balanced' when applied + reaction is within tolerance; 'incomplete' " +
+            "lists loads it cannot sum (edge pressure, auto lateral loads, acceleration); other case types are reported " +
+            "unchecked. Read only.",
+            Schema("cases", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Load cases / combinations, * and ? wildcards (default all with results)."),
+                "tolerance", Prop("number", "Allowed residual as a fraction of the larger of applied and reaction (default 0.005).")),
+            ReactionsSummary);
+
+        Add("compare_runs",
+            "Biggest changes of one result quantity between two runs (checkpoints) of the current session, per object and " +
+            "case, from the envelopes run_analysis saved: value in a, in b, change, relative change; counts of objects that " +
+            "changed. Without kind: lists the runs. Default b = the latest run, a = the one before. Read only.",
+            Schema("kind", Enum("Result kind.", SapResults.ResultKinds),
+                "quantity", Prop("string", "One quantity of that kind (see query_results)."),
+                "a", Prop("string", "Earlier run, e.g. r001."),
+                "b", Prop("string", "Later run, e.g. r002."),
+                "cases", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Only these cases / combinations, * and ? wildcards."),
+                "group", Prop("string", "Only objects of this SAP2000 group (as the model is now)."),
+                "selection", Prop("string", "Only objects of a saved selection."),
+                "top_n", Prop("integer", "How many changes to list (default 20, max 500).")),
+            CompareRuns);
+
+        Add("export_viewer",
+            "Exports the model SAP2000 holds, with its results, for the Pluto viewer: analysis mesh, model and results " +
+            ".s2k, then .bin + .features.json in the session dir (Run-Sap.ps1 -Export). Open viewer\\index.html and pick " +
+            "the .bin. Takes a while on large models. Does not change the model.",
+            Schema("results", Prop("boolean", "Include results (default true when the model has them)."),
+                "final_only", Prop("boolean", "Staged / multi-step cases: only the last step."),
+                "cylindrical", Prop("boolean", "Add radial / tangential translations (R, T) for tanks and other axisymmetric models.")),
+            ExportViewer);
     }
 
     object Status(Dictionary<string, object> a)
@@ -174,7 +243,7 @@ public sealed class ToolSet
         string path = Json.Str(a, "path");
         if (string.IsNullOrEmpty(path)) throw new ToolError("path is required");
         path = Path.GetFullPath(path);
-        string dir = Path.Combine(ctx.WorkDir, "models", Safe(Path.GetFileNameWithoutExtension(path)), DateTime.Now.ToString("yyyyMMdd-HHmmss", Json.Inv));
+        string dir = NewSessionDir(path);
         return ctx.Sap.OpenModel(path, dir);
     }
 
@@ -364,6 +433,186 @@ public sealed class ToolSet
             if (toFile && rows.Count > 0) res["file"] = WriteTsv(name, rows);
             return Page(res, "rows", rows, offset, limit);
         });
+    }
+
+    // ---------------------------------------------------------------- phase 2 handlers
+
+    object RunAnalysis(Dictionary<string, object> a)
+    {
+        string[] cases = Json.Strs(a, "cases");
+        if (cases != null && cases.Length == 0) cases = null;
+        return ctx.Sap.RunAnalysis(cases, Json.Bool(a, "summary", true), delegate(string path) { return NewSessionDir(path); });
+    }
+
+    object QueryResults(Dictionary<string, object> a)
+    {
+        SapResults.ResultQuery q = new SapResults.ResultQuery();
+        q.Kind = Json.Str(a, "kind");
+        if (q.Kind == null || Array.IndexOf(SapResults.ResultKinds, q.Kind) < 0) throw new ToolError("kind must be " + string.Join(", ", SapResults.ResultKinds));
+        q.Quantity = Json.Str(a, "quantity");
+        if (string.IsNullOrEmpty(q.Quantity)) throw new ToolError("quantity is required: " + string.Join(", ", SapResults.Quantities(q.Kind)));
+        q.Cases = Json.Strs(a, "cases");
+        q.Top = Math.Min(500, Math.Max(1, Json.Int(a, "top_n", 20)));
+        q.Envelope = Json.Bool(a, "envelope", true);
+        q.Sort = Json.Str(a, "sort") ?? "abs";
+        if (q.Sort != "abs" && q.Sort != "max" && q.Sort != "min") throw new ToolError("sort is abs, max or min");
+        string[] byGroup = Json.Strs(a, "by_group");
+        string group = Json.Str(a, "group"), selection = Json.Str(a, "selection"), name = Json.Str(a, "name");
+        Dictionary<string, object> saved = selection == null ? null : LoadSelection(selection);
+        if (Json.Bool(a, "to_file", false))
+            q.ToFile = Path.Combine(ctx.WorkDir, "results", Safe(q.Kind + "-" + q.Quantity) + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", Json.Inv) + ".tsv");
+        return ctx.Sap.Results("query_results", delegate(SapRead r, SapResults res)
+        {
+            q.Only = Only(r, SapResults.ObjectKind(q.Kind), group, saved, name);
+            if (byGroup != null && byGroup.Length > 0)
+            {
+                List<string> gs = new List<string>();
+                foreach (string g in r.GroupRows().ConvertAll(delegate(Dictionary<string, object> d) { return (string)d["name"]; }))
+                    foreach (string p in byGroup) if (SapRead.Like(g, p) && !gs.Contains(g)) gs.Add(g);
+                if (gs.Count == 0) throw new ToolError("by_group matched no group");
+                q.Groups = gs.Count > 100 ? gs.GetRange(0, 100) : gs;
+            }
+            return res.Query(q);
+        });
+    }
+
+    object ReactionsSummary(Dictionary<string, object> a)
+    {
+        string[] cases = Json.Strs(a, "cases");
+        double tol = Json.Num(a, "tolerance") ?? SapDriver.DefaultTolerance;
+        return ctx.Sap.Results("reactions_summary", delegate(SapRead r, SapResults res) { return res.Reactions(cases, tol); });
+    }
+
+    object CompareRuns(Dictionary<string, object> a)
+    {
+        string kind = Json.Str(a, "kind"), quantity = Json.Str(a, "quantity"), ra = Json.Str(a, "a"), rb = Json.Str(a, "b");
+        string group = Json.Str(a, "group"), selection = Json.Str(a, "selection");
+        string[] cases = Json.Strs(a, "cases");
+        int top = Math.Min(500, Math.Max(1, Json.Int(a, "top_n", 20)));
+        Dictionary<string, object> saved = selection == null ? null : LoadSelection(selection);
+        if (kind != null && Array.IndexOf(SapResults.ResultKinds, kind) < 0) throw new ToolError("kind must be " + string.Join(", ", SapResults.ResultKinds));
+        HashSet<string> only = null;
+        string model = ctx.Sap.Read("compare_runs", delegate(SapRead r)
+        {
+            if (kind != null) only = Only(r, SapResults.ObjectKind(kind), group, saved, null);
+            return r.ModelPath();
+        });
+        string dir = SapDriver.SessionDirOf(model);
+        if (dir == null) throw new ToolError("SAP2000 holds " + model + ", which is not a Pluto session: open_model, then run_analysis (twice) first");
+        string runsDir = Path.Combine(dir, "runs");
+        List<string> runs = new List<string>();
+        if (Directory.Exists(runsDir)) foreach (string d in Directory.GetDirectories(runsDir)) runs.Add(Path.GetFileName(d));
+        runs.Sort(StringComparer.Ordinal);
+        if (kind == null) return Json.O("sessionDir", dir, "runs", runs, "note", runs.Count < 2 ? "compare_runs needs two runs: run_analysis again after a change" : "pass kind and quantity to compare");
+        if (string.IsNullOrEmpty(quantity)) throw new ToolError("quantity is required: " + string.Join(", ", SapResults.Quantities(kind)));
+        if (rb == null) { if (runs.Count == 0) throw new ToolError("no runs in this session: run_analysis first"); rb = runs[runs.Count - 1]; }
+        if (ra == null)
+        {
+            int ib = runs.IndexOf(rb);
+            if (ib < 1) throw new ToolError("no run before " + rb + " (runs: " + string.Join(", ", runs.ToArray()) + ")");
+            ra = runs[ib - 1];
+        }
+        string fa = Path.Combine(runsDir, ra, kind + ".tsv"), fb = Path.Combine(runsDir, rb, kind + ".tsv");
+        foreach (string f in new[] { fa, fb })
+            if (!File.Exists(f)) throw new ToolError("no " + kind + " envelope for " + Path.GetFileName(Path.GetDirectoryName(f)) + " (runs: " + string.Join(", ", runs.ToArray()) + ")");
+        Dictionary<string, object> res;
+        try { res = SapResults.Compare(fa, fb, quantity, only, cases, top); }
+        catch (ArgumentException e) { throw new ToolError(e.Message); }
+        res["kind"] = kind; res["a"] = ra; res["b"] = rb; res["runs"] = runs;
+        res["basis"] = "per object and case: the value of largest magnitude over stations / joints / steps; change = b - a";
+        return res;
+    }
+
+    object ExportViewer(Dictionary<string, object> a)
+    {
+        bool wantResults = Json.Bool(a, "results", true), finalOnly = Json.Bool(a, "final_only", false), cyl = Json.Bool(a, "cylindrical", false);
+        bool hasResults = false;
+        string model = ctx.Sap.Results("export_viewer", delegate(SapRead r, SapResults res)
+        {
+            hasResults = res.ResolveCases(null).Count > 0;
+            return r.ModelPath();
+        });
+        string dir = SapDriver.SessionDirOf(model) ?? Path.Combine(ctx.WorkDir, "viewer");
+        string name = Safe(Path.GetFileNameWithoutExtension(model)), id = name;
+        string sessionFile = Path.Combine(dir, "session.json");
+        if (File.Exists(sessionFile))
+        {
+            Dictionary<string, object> sj = Json.Parse(File.ReadAllText(sessionFile)) as Dictionary<string, object>;
+            string orig = sj == null ? null : Json.Str(sj, "original");
+            if (orig != null) id = Safe(Path.GetFileNameWithoutExtension(orig)) + "-" + name;
+        }
+        string outBase = Path.Combine(dir, "viewer", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(outBase));
+        string runner = Path.GetFullPath(Path.Combine(ctx.ExeDir, @"..\..\sap\Run-Sap.ps1"));
+        if (!File.Exists(runner)) throw new ToolError("Run-Sap.ps1 not found at " + runner);
+        StringBuilder args = new StringBuilder("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + runner + "\" -KeepOpen -Export \"" + outBase + "\" -ModelId \"sap/" + id + "\"");
+        if (!wantResults || !hasResults) args.Append(" -NoResults");
+        if (finalOnly) args.Append(" -FinalOnly");
+        if (cyl) args.Append(" -Cylindrical");
+
+        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"), args.ToString());
+        psi.UseShellExecute = false; psi.CreateNoWindow = true;
+        psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        string output, errors;
+        using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi))
+        {
+            p.StandardInput.Close();
+            System.Threading.Tasks.Task<string> so = p.StandardOutput.ReadToEndAsync(), se = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(30 * 60 * 1000)) { try { p.Kill(); } catch (InvalidOperationException) { } throw new ToolError("export did not finish within 30 minutes"); }
+            output = so.Result; errors = se.Result;
+            if (p.ExitCode != 0)
+            {
+                File.WriteAllText(outBase + ".export.log", output + "\n" + errors);
+                throw new ToolError("Run-Sap.ps1 -Export failed (exit " + p.ExitCode + "): " + Tail(errors.Length > 0 ? errors : output, 1500) + " (log: " + outBase + ".export.log)");
+            }
+        }
+        File.WriteAllText(outBase + ".export.log", output + (errors.Length > 0 ? "\n" + errors : ""));
+        List<string> steps = new List<string>();
+        Dictionary<string, object> result = null;
+        foreach (string line in output.Split('\n'))
+        {
+            string l = line.TrimEnd('\r');
+            if (l.StartsWith("RESULT ")) result = Json.Parse(l.Substring(7)) as Dictionary<string, object>;
+            else if (l.StartsWith("[") && steps.Count < 40) steps.Add(l);
+        }
+        Dictionary<string, object> reply = Json.O("bin", outBase + ".bin", "features", outBase + ".features.json",
+            "modelS2k", outBase + ".model.s2k", "results", wantResults && hasResults ? (object)(outBase + ".results.s2k") : "not exported" + (hasResults ? "" : ": the model has no results"),
+            "seconds", Math.Round(sw.Elapsed.TotalSeconds, 1), "log", outBase + ".export.log", "steps", steps,
+            "open", "open viewer\\index.html in a browser and pick the .bin (keep the .features.json beside it for groups)");
+        if (result == null) reply["warning"] = "Run-Sap.ps1 printed no RESULT line: see the log";
+        if (!File.Exists(outBase + ".bin")) reply["warning"] = "no .bin was written: see the log";
+        return reply;
+    }
+
+    static string Tail(string s, int n) { s = (s ?? "").Trim(); return s.Length <= n ? s : "..." + s.Substring(s.Length - n); }
+
+    // Object names allowed by group, saved selection and name pattern together (null: all).
+    static HashSet<string> Only(SapRead r, string kind, string group, Dictionary<string, object> saved, string name)
+    {
+        HashSet<string> only = null;
+        if (group != null)
+        {
+            if (!r.GroupExists(group)) throw new ToolError("no group '" + group + "'");
+            only = new HashSet<string>(r.GroupMembers(group, kind));
+        }
+        if (saved != null)
+        {
+            HashSet<string> s = new HashSet<string>(SelectionNames(saved, kind));
+            if (only == null) only = s; else only.IntersectWith(s);
+        }
+        if (name != null)
+        {
+            HashSet<string> s = new HashSet<string>(r.Objects().Names(kind).FindAll(delegate(string n) { return SapRead.Like(n, name); }));
+            if (only == null) only = s; else only.IntersectWith(s);
+        }
+        return only;
+    }
+
+    string NewSessionDir(string modelPath)
+    {
+        return Path.Combine(ctx.WorkDir, "models", Safe(Path.GetFileNameWithoutExtension(modelPath)), DateTime.Now.ToString("yyyyMMdd-HHmmss", Json.Inv));
     }
 
     // ---------------------------------------------------------------- helpers
