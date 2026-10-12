@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pluto": {
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "scripts/mcp/Start-PlutoMcp.ps1"]
+    }
+  }
+}

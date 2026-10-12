@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "pluto": {
+      "type": "stdio",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/scripts/mcp/Start-PlutoMcp.ps1"]
+    }
+  }
+}

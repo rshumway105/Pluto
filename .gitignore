@@ -21,3 +21,6 @@ scripts/duct/duct-config.psd1
 
 # Navisworks add-in build output
 scripts/navis/bin/
+
+# Pluto MCP server build output (Build-PlutoMcp.ps1)
+scripts/mcp/bin/
