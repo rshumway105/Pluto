@@ -93,12 +93,15 @@ test file from `sampleModel.js`, then open it back through the picker.
 | `features.js` | sidecar loader, Color by groups, legend, predicate hook |
 | `predicates.js` | predicate flyout + engine (`FEAPredicates`) |
 | `sectionCut.js` | section cuts: named list (groups, visibility, adjust, delete, numeric centre), probe + plot + isolate on the selected cut (this wall / slab, or a **crop box** of the cut length by a width along a secondary axis, 2026-09-10), sidecar round trip, legacy import (2026-09-04) |
+| `live.js` | live mode (`index.html?live=1`, served by the Pluto MCP server): a WebSocket to the server; the LLM's viewer tools load a model (HTTP Range slices), pick component / load case, highlight and isolate objects, focus, and read the pinned readout. Inert without `?live` |
 | `viewCube.js` | orientation cube |
 | `inspector.html` / `inspector.js` | standalone field-by-field binary inspector |
 
 Three.js r128 and OrbitControls are vendored under `lib/`.
 
 ## Recent additions (newest first)
+
+Live mode (2026-10-12, `live.js`): the Pluto MCP server hosts the viewer on `http://localhost:<port>/viewer/index.html?live=1` and drives it over a WebSocket ([[vault/decisions/2026-10-12-llm-model-interface|LLM model interface]], phase 4). Commands go through the existing controls (component / LC dropdowns, Find, the groups switch, the section-cut `elemVis` attribute), so there is no second render path. A highlight is a sidecar group tagged `pluto-live`. Verified in a headless Edge (software WebGL) on the example tank.
 
 Files (2026-09-04, `files.js`): one "Choose files…" for .bin + .json (File System Access
 API on Chrome / Edge, hidden `<input type=file>` otherwise), one "Save features" (Ctrl+S)

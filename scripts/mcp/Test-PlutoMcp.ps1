@@ -5,9 +5,10 @@
 # working copy and runs every phase 1 tool on it; -Run adds the phase 2 tools (two runs, results, reactions,
 # compare, viewer export), and with -SelfTest also opens the self-test beam and checks its hand values through
 # them. -Edit (with -SelfTest) edits the beam through the phase 3 tools, runs it and checks hand values, checkpoints,
-# revert and the change log. Replies are printed cut to -Show characters.
-#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-SelfTest [-Edit]] [-Model <sdb|s2k> [-Run]] [-Show 600]
-param([switch]$Direct, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [int]$Show = 600)
+# revert and the change log. -Viewer (with -Model -Run) drives the live viewer in a headless Edge through the viewer
+# tools. Replies are printed cut to -Show characters.
+#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-SelfTest [-Edit]] [-Model <sdb|s2k> [-Run [-Viewer]]] [-Show 600]
+param([switch]$Direct, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [switch]$Viewer, [int]$Show = 600)
 $ErrorActionPreference = "Stop"
 $psi = New-Object Diagnostics.ProcessStartInfo
 if ($Direct) {
@@ -158,6 +159,44 @@ try {
             Check "compare_runs joint U3: same model, nothing changed" ($cmp -and $cmp.compared -gt 0 -and $cmp.changed -eq 0)
             $ex = Tool "export_viewer" @{} 1800
             Check "export_viewer: .bin and .features.json written" ($ex -and (Test-Path $ex.bin) -and (Test-Path $ex.features))
+            if ($Viewer) {
+                # the live viewer in a headless Edge (software WebGL), driven through the tools
+                $vo = Tool "viewer_open" @{ open_browser = $false }
+                Check "viewer_open: hosted on localhost" ($vo -and $vo.url -like "http://localhost:*/viewer/index.html?live=1")
+                $edgeExe = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+                $profile = Join-Path $env:TEMP ("pluto-live-" + [Guid]::NewGuid().ToString("N"))
+                $edge = Start-Process $edgeExe -ArgumentList @("--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--no-first-run", "--user-data-dir=$profile", $vo.url) -PassThru
+                try {
+                    $con = $null
+                    for ($k = 0; $k -lt 30 -and -not ($con -and $con.connected); $k++) { Start-Sleep -Milliseconds 1000; $con = Tool "viewer_open" @{ open_browser = $false } }
+                    Check "viewer connects over the WebSocket" ($con -and $con.connected)
+                    $vl = Tool "viewer_load" @{} 900
+                    Check ("viewer_load: model with components (" + (@($vl.state.components) -join ", ") + ")") ($vl -and $vl.state.loaded -and @($vl.state.components).Count -gt 0 -and @($vl.state.cases).Count -gt 0)
+                    $comp = @($vl.state.components)[0]
+                    $vs = Tool "viewer_show" @{ component = $comp; case = "HYDRO" }
+                    Check "viewer_show: HYDRO, $comp" ($vs -and $vs.case -like "HYDRO*" -and $vs.component -eq $comp)
+                    $null = Tool "viewer_show" @{ case = "NO_SUCH_CASE" } -ExpectError
+                    $vh = Tool "viewer_highlight" @{ group = $d.groups[1].name }
+                    Check ("viewer_highlight group " + $d.groups[1].name + ": painted, groups on") ($vh -and ($vh.highlighted.shells + $vh.highlighted.beams + $vh.highlighted.nodes) -gt 0 -and $vh.state.groupsOn -and (@($vh.state.groups) | Where-Object { $_.live -and $_.shown }))
+                    $vu = Tool "viewer_highlight" @{ clear = $true }
+                    Check "viewer_highlight clear: no live group" ($vu -and -not (@($vu.groups) | Where-Object live))
+                    $vi = Tool "viewer_isolate" @{ group = $d.groups[1].name }
+                    Check "viewer_isolate: some elements kept" ($vi -and $vi.isolated -and ($vi.isolated.shells + $vi.isolated.beams) -gt 0)
+                    $vc = Tool "viewer_isolate" @{ clear = $true }
+                    Check "viewer_isolate clear: everything shown" ($vc -and $null -eq $vc.isolated)
+                    $vf = Tool "viewer_focus" @{ kind = "joint"; name = "1" }
+                    Check "viewer_focus joint 1" ($vf -and $vf.status -like "Node*")
+                    $vg = Tool "viewer_get_selection" @{}
+                    Check "viewer_get_selection: state, nothing pinned" ($vg -and $vg.state.loaded -and $vg.state.pinned -eq $false)
+                    $rr = Tool "run_analysis" @{} 3600
+                    Check "run_analysis with a viewer connected: exported and reloaded" ($rr -and $rr.viewer.reloaded -like "*$($rr.checkpoint).bin")
+                } finally {
+                    if ($edge -and -not $edge.HasExited) { Stop-Process -Id $edge.Id -Force -ErrorAction SilentlyContinue }
+                    Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object { $_.CommandLine -like "*$profile*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                    Start-Sleep -Milliseconds 500
+                    Remove-Item -Recurse -Force $profile -ErrorAction SilentlyContinue
+                }
+            }
 
             if ($beam) {
                 # the self-test beam by hand: 20 ft, 10 kip at midspan -> reactions 5 + 5 kip up, M3 50 kip-ft

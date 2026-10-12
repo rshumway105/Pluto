@@ -299,3 +299,28 @@ checkpoint; revert to r001 gives its M3 100 again; the change log holds every ap
 
 Not yet tried: the edit tools on a large model or through Claude Desktop; `set_material_property` and area loads by
 hand values; a model whose load cases are not static (case definitions other than static are not edited).
+
+## Phase 4 status (2026-10-12)
+
+Built and tested on the development machine, server 0.5.0. `scripts/mcp/ViewerHost.cs` (an `HttpListener` on
+`http://localhost:<port>/`, 8765 or `PLUTO_VIEWER_PORT`, the next free port if taken; a normal user may listen on
+localhost without a URL reservation) serves `viewer/` under `/viewer/` and the work dir under `/work/` with HTTP Range,
+and a WebSocket at `/live`. Nothing outside the two roots is served. `viewer/scripts/live.js` (only with `?live=1`)
+connects, reconnects when the server restarts, and runs commands through the viewer's own controls.
+
+| tool | notes |
+|---|---|
+| `viewer_open` | starts the host, opens the default browser unless a viewer is connected, returns the URL and the viewer's state |
+| `viewer_load` | default: the current checkpoint's export (exports first when missing or `export: true`); the `.bin` is read by `remoteFile` through Range slices, so it never loads whole |
+| `viewer_show` | shell component, load case, beam component, deformed; names case-insensitive, prefix enough; the reply lists them |
+| `viewer_highlight` | group, saved selection or names → mesh ids through `<base>.labels.csv` → a sidecar group tagged `pluto-live`, others off (`only`); `clear` restores their flags. This is the "saved selection as a viewer group" item |
+| `viewer_isolate` | shells and beams by id on the `elemVis` attribute (the section-cut isolate path); `clear` |
+| `viewer_focus` | joint / area; a frame or link focuses its first joint (Find covers shells and nodes) |
+| `viewer_get_selection` | state plus the pinned readout, element / node mapped back to the SAP2000 object |
+| (`run_analysis`) | with a viewer connected, exports and reloads it after the run (`update_viewer`, default true) |
+
+Verified (`Test-PlutoMcp.ps1 -Run -Viewer -Model <tank>`, 154 checks): a headless Edge (`--use-angle=swiftshader`)
+connects, loads r002 over Range, shows HYDRO / F11, highlights and isolates the WALL group, focuses joint 1, reports
+its state, and reloads r003 after the next run. Not yet tried: a user's click read back through
+`viewer_get_selection` (the pinned readout path), a multi-GB `.bin`, the node tests (`node` is not installed on this
+machine; `live.js` changes no existing module).

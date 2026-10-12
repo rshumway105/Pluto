@@ -292,5 +292,22 @@ public sealed class ServerContext : IDisposable
         return c;
     }
 
-    public void Dispose() { Sap.Dispose(); }
+    // The live viewer host, started by the first viewer tool. Port: PLUTO_VIEWER_PORT, else 8765 (or the next free).
+    ViewerHost viewer;
+    public ViewerHost Viewer(bool start)
+    {
+        if (viewer == null && start)
+        {
+            string dir = Path.GetFullPath(Path.Combine(ExeDir, @"..\..\..\viewer"));
+            if (!File.Exists(Path.Combine(dir, "index.html"))) throw new ToolError("the viewer is not at " + dir);
+            int port;
+            if (!int.TryParse(Environment.GetEnvironmentVariable("PLUTO_VIEWER_PORT"), out port)) port = 8765;
+            ViewerHost v = new ViewerHost(dir, WorkDir, Log);
+            v.Start(port);
+            viewer = v;
+        }
+        return viewer;
+    }
+
+    public void Dispose() { if (viewer != null) viewer.Dispose(); Sap.Dispose(); }
 }

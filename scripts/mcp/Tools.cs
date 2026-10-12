@@ -162,7 +162,8 @@ public sealed class ToolSet
             "confirm with the user before a long run.",
             Schema("cases", Json.O("type", "array", "items", Json.O("type", "string"),
                     "description", "Only these load cases (and the initial cases they continue from). Default: every case."),
-                "summary", Prop("boolean", "Save envelopes and reactions for compare_runs / the reply (default true).")),
+                "summary", Prop("boolean", "Save envelopes and reactions for compare_runs / the reply (default true)."),
+                "update_viewer", Prop("boolean", "When a live viewer is connected, export and reload it after the run (default true).")),
             RunAnalysis);
 
         Add("query_results",
@@ -419,6 +420,53 @@ public sealed class ToolSet
             Schema("checkpoint", Prop("string", "Only edits into this checkpoint."), "offset", Prop("integer", "First entry (default 0)."),
                 "limit", Prop("integer", "Entries (default 50)."), "session_dir", Prop("string", "Another session's folder.")),
             GetChangeLog);
+        // ------------------------------------------------ phase 4: drive the viewer
+
+        Add("viewer_open", "Starts the live Pluto viewer: the server hosts it on http://localhost:<port> and opens it in the default " +
+            "browser (open_browser false: only returns the URL). The viewer then follows viewer_load / show / highlight / isolate / " +
+            "focus, and viewer_get_selection reads what the user clicked. Returns the URL and the viewer's state.",
+            Schema("open_browser", Prop("boolean", "Open the URL in the default browser when no viewer is connected (default true).")),
+            ViewerOpen);
+
+        Add("viewer_load", "Loads a model into the live viewer: by default the latest export_viewer of the current checkpoint (export: " +
+            "true exports first, or when none exists). The .bin streams in slices (HTTP Range), so large files load too.",
+            Schema("bin", Prop("string", "A .bin under the work dir (default: the current checkpoint's export)."),
+                "export", Prop("boolean", "Run export_viewer first (default: only when the checkpoint has no export).")),
+            ViewerLoad);
+
+        Add("viewer_show", "Chooses what the live viewer shows: the shell result component (e.g. 'SVM Top', as listed in the viewer's " +
+            "components), the load case, the beam component, the deformed shape. Names match case-insensitively, a prefix is " +
+            "enough; the reply lists the available ones.",
+            Schema("component", Prop("string", "Shell result component."), "case", Prop("string", "Load case."),
+                "beam_component", Prop("string", "Beam result component."), "deformed", Prop("boolean", "Show the deformed shape.")),
+            delegate(Dictionary<string, object> a)
+            {
+                return Viewer().Command("show", Json.O("component", Json.Str(a, "component"), "case", Json.Str(a, "case"),
+                    "beam_component", Json.Str(a, "beam_component"), "deformed", a.ContainsKey("deformed") ? (object)Json.Bool(a, "deformed", false) : null), TimeSpan.FromSeconds(60));
+            });
+
+        Add("viewer_highlight", "Paints objects in the live viewer in one colour: a SAP2000 group, a saved selection (select_objects " +
+            "save_as) and / or names of one kind; only (default true) turns the other groups off. clear removes the highlight. " +
+            "Objects are mapped to the viewer's mesh ids through the export's labels.",
+            Schema(Cat(new object[] { "kind", Enum("Kind of the names.", Kinds) }, TargetsOf("objects"), new object[] {
+                "color", Prop("string", "#rrggbb (default #ff3030)."), "label", Prop("string", "Name shown in the viewer's Groups tab."),
+                "only", Prop("boolean", "Turn the other groups off (default true)."), "clear", Prop("boolean", "Remove the highlight.") })),
+            ViewerHighlight);
+
+        Add("viewer_isolate", "Shows only the given objects in the live viewer (a group, a saved selection and / or names of one kind; " +
+            "shells and beams), everything else hidden; clear shows everything again.",
+            Schema(Cat(new object[] { "kind", Enum("Kind of the names.", Kinds) }, TargetsOf("objects"), new object[] {
+                "clear", Prop("boolean", "Show everything again.") })),
+            ViewerIsolate);
+
+        Add("viewer_focus", "Moves the live viewer's orbit centre to one object and flashes it: a joint, an area, or a frame / link " +
+            "(its first joint).",
+            Schema(new[] { "kind", "name" }, "kind", Enum("joint, frame, area or link.", Kinds), "name", Prop("string", "SAP2000 name.")),
+            ViewerFocus);
+
+        Add("viewer_get_selection", "What the live viewer shows and what the user pinned (clicked): component, load case, the pinned " +
+            "value with its element / node (mapped back to the SAP2000 object), and the groups shown. Read only.",
+            Schema(), ViewerSelection);
     }
 
     object Status(Dictionary<string, object> a)
@@ -640,7 +688,9 @@ public sealed class ToolSet
     {
         string[] cases = Json.Strs(a, "cases");
         if (cases != null && cases.Length == 0) cases = null;
-        return ctx.Sap.RunAnalysis(cases, Json.Bool(a, "summary", true), delegate(string path) { return NewSessionDir(path); });
+        Dictionary<string, object> run = ctx.Sap.RunAnalysis(cases, Json.Bool(a, "summary", true), delegate(string path) { return NewSessionDir(path); });
+        UpdateViewerAfterRun(a, run);
+        return run;
     }
 
     object QueryResults(Dictionary<string, object> a)
@@ -783,6 +833,236 @@ public sealed class ToolSet
         if (result == null) reply["warning"] = "Run-Sap.ps1 printed no RESULT line: see the log";
         if (!File.Exists(outBase + ".bin")) reply["warning"] = "no .bin was written: see the log";
         return reply;
+    }
+
+    // ---------------------------------------------------------------- phase 4 handlers
+
+    ViewerHost Viewer() { return ctx.Viewer(true); }
+
+    object ViewerOpen(Dictionary<string, object> a)
+    {
+        ViewerHost v = Viewer();
+        bool opened = false;
+        if (!v.Connected && Json.Bool(a, "open_browser", true))
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(v.Url) { UseShellExecute = true });
+            opened = true;
+            for (int i = 0; i < 150 && !v.Connected; i++) System.Threading.Thread.Sleep(100);
+        }
+        Dictionary<string, object> r = Json.O("url", v.Url, "connected", v.Connected, "openedBrowser", opened);
+        if (v.Connected) r["state"] = v.Command("state", null, TimeSpan.FromSeconds(20));
+        else r["note"] = "open " + v.Url + " in Chrome or Edge; the viewer connects by itself";
+        return r;
+    }
+
+    object ViewerLoad(Dictionary<string, object> a)
+    {
+        ViewerHost v = Viewer();
+        if (!v.Connected) throw new ToolError("no viewer is connected: viewer_open first");
+        string bin = Json.Str(a, "bin");
+        Dictionary<string, object> exported = null;
+        if (bin == null)
+        {
+            string model = ctx.Sap.Read("viewer_load", delegate(SapRead r) { return r.ModelPath(); });
+            string dir = SapDriver.SessionDirOf(model) ?? Path.Combine(ctx.WorkDir, "viewer");
+            bin = Path.Combine(dir, "viewer", Safe(Path.GetFileNameWithoutExtension(model)) + ".bin");
+            if (Json.Bool(a, "export", false) || !File.Exists(bin))
+            {
+                exported = (Dictionary<string, object>)ExportViewer(new Dictionary<string, object>());
+                bin = (string)exported["bin"];
+            }
+        }
+        if (!File.Exists(bin)) throw new ToolError("no such file: " + bin);
+        string baseName = bin.Substring(0, bin.Length - 4), url = v.WorkUrl(bin);
+        if (url == null) throw new ToolError("the viewer serves only files under the work dir " + ctx.WorkDir);
+        string feat = File.Exists(baseName + ".features.json") ? v.WorkUrl(baseName + ".features.json") : null;
+        object state = v.Command("load", Json.O("bin", url, "features", feat, "name", Path.GetFileNameWithoutExtension(bin)), TimeSpan.FromMinutes(10));
+        v.LoadedBase = baseName;
+        labels = null;
+        Dictionary<string, object> res = Json.O("loaded", bin, "features", feat != null, "state", state);
+        if (exported != null) res["exported"] = Json.O("seconds", exported["seconds"], "results", exported["results"]);
+        return res;
+    }
+
+    // ---- SAP2000 names <-> the export's mesh ids (<base>.labels.csv: kind,id,element,object)
+
+    sealed class Labels
+    {
+        public string Base;
+        public readonly Dictionary<string, List<int>> ByName = new Dictionary<string, List<int>>();   // "kind|SAP name" -> mesh ids
+        public readonly Dictionary<string, string> ById = new Dictionary<string, string>();           // "kind|mesh id" -> SAP name
+    }
+    Labels labels;
+
+    Labels CurrentLabels()
+    {
+        ViewerHost v = Viewer();
+        if (v.LoadedBase == null) throw new ToolError("no model was loaded through viewer_load in this server session");
+        if (labels != null && labels.Base == v.LoadedBase) return labels;
+        string file = v.LoadedBase + ".labels.csv";
+        if (!File.Exists(file)) throw new ToolError("no labels next to the loaded model: " + file);
+        Labels l = new Labels(); l.Base = v.LoadedBase;
+        foreach (string line in File.ReadAllLines(file))
+        {
+            string[] f = Csv(line);
+            if (f.Length < 4 || f[0] == "kind") continue;
+            string sap = f[0] == "joint" ? f[2] : f[3];   // joints: the joint; meshed objects: the object
+            if (string.IsNullOrEmpty(sap)) continue;
+            int id;
+            if (!int.TryParse(f[1], out id)) continue;
+            List<int> ids;
+            string key = f[0] + "|" + sap;
+            if (!l.ByName.TryGetValue(key, out ids)) { ids = new List<int>(); l.ByName[key] = ids; }
+            ids.Add(id);
+            l.ById[f[0] + "|" + f[1]] = sap;
+        }
+        labels = l;
+        return l;
+    }
+
+    static string[] Csv(string line)
+    {
+        List<string> r = new List<string>();
+        StringBuilder sb = new StringBuilder();
+        bool q = false;
+        for (int i = 0; i < line.Length; i++)
+        {
+            char c = line[i];
+            if (q) { if (c == '"' && i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; } else if (c == '"') q = false; else sb.Append(c); }
+            else if (c == '"') q = true;
+            else if (c == ',') { r.Add(sb.ToString()); sb.Length = 0; }
+            else sb.Append(c);
+        }
+        r.Add(sb.ToString());
+        return r.ToArray();
+    }
+
+    // SAP2000 objects named by group / selection / names (kind) -> mesh ids per viewer domain.
+    Dictionary<string, List<int>> MeshTargets(Dictionary<string, object> a)
+    {
+        string group = Json.Str(a, "group"), selection = Json.Str(a, "selection"), kind = Kind(a, "kind", false);
+        string[] names = Json.Strs(a, "names");
+        if (group == null && selection == null && names == null) throw new ToolError("say what: group, selection or names (with kind)");
+        if (names != null && kind == null) throw new ToolError("kind is required with names");
+        Dictionary<string, object> saved = selection == null ? null : LoadSelection(selection);
+        Dictionary<string, List<string>> sap = ctx.Sap.Read("viewer targets", delegate(SapRead r)
+        {
+            Dictionary<string, List<string>> d = new Dictionary<string, List<string>>();
+            foreach (string k in Kinds)
+            {
+                List<string> l = new List<string>();
+                if (group != null) { if (!r.GroupExists(group)) throw new ToolError("no group '" + group + "'"); l.AddRange(r.GroupMembers(group, k)); }
+                if (saved != null) l.AddRange(SelectionNames(saved, k));
+                if (names != null && k == kind) l.AddRange(names);
+                d[k] = l;
+            }
+            return d;
+        });
+        Labels lb = CurrentLabels();
+        Dictionary<string, List<int>> m = new Dictionary<string, List<int>>();
+        m["nodes"] = new List<int>(); m["shells"] = new List<int>(); m["beams"] = new List<int>();
+        int missing = 0;
+        foreach (KeyValuePair<string, List<string>> kv in sap)
+        {
+            string dom = kv.Key == "joint" ? "nodes" : kv.Key == "area" ? "shells" : kv.Key == "frame" ? "beams" : null;
+            foreach (string n in kv.Value)
+            {
+                List<int> ids;
+                if (dom != null && lb.ByName.TryGetValue(kv.Key + "|" + n, out ids)) m[dom].AddRange(ids);
+                else missing++;
+            }
+        }
+        if (missing > 0) m["missing"] = new List<int>(new[] { missing });
+        return m;
+    }
+
+    object ViewerHighlight(Dictionary<string, object> a)
+    {
+        ViewerHost v = Viewer();
+        if (Json.Bool(a, "clear", false)) return v.Command("unhighlight", null, TimeSpan.FromSeconds(60));
+        Dictionary<string, List<int>> m = MeshTargets(a);
+        List<object> members = new List<object>();
+        if (m["shells"].Count > 0) members.Add(Json.O("domain", "shells", "ids", m["shells"]));
+        if (m["beams"].Count > 0) members.Add(Json.O("domain", "beams", "ids", m["beams"]));
+        if (m["nodes"].Count > 0 && m["shells"].Count == 0 && m["beams"].Count == 0) members.Add(Json.O("nodeIds", m["nodes"]));
+        if (members.Count == 0) throw new ToolError("none of these objects is in the viewer's mesh");
+        string label = Json.Str(a, "label") ?? Json.Str(a, "group") ?? Json.Str(a, "selection") ?? "highlight";
+        object item = Json.O("id", Guid.NewGuid().ToString("N"), "name", label, "color", Json.Str(a, "color") ?? "#ff3030", "members", members);
+        object st = v.Command("highlight", Json.O("items", new object[] { item }, "only", Json.Bool(a, "only", true)), TimeSpan.FromSeconds(60));
+        Dictionary<string, object> r = Json.O("highlighted", Json.O("shells", m["shells"].Count, "beams", m["beams"].Count, "nodes", m["nodes"].Count), "state", st);
+        if (m.ContainsKey("missing")) r["notInMesh"] = m["missing"][0];
+        return r;
+    }
+
+    object ViewerIsolate(Dictionary<string, object> a)
+    {
+        ViewerHost v = Viewer();
+        if (Json.Bool(a, "clear", false)) return v.Command("isolate", Json.O("shells", null, "beams", null), TimeSpan.FromSeconds(60));
+        Dictionary<string, List<int>> m = MeshTargets(a);
+        if (m["shells"].Count == 0 && m["beams"].Count == 0) throw new ToolError("none of these objects is a shell or beam of the viewer's mesh");
+        return v.Command("isolate", Json.O("shells", m["shells"], "beams", m["beams"]), TimeSpan.FromSeconds(60));
+    }
+
+    object ViewerFocus(Dictionary<string, object> a)
+    {
+        ViewerHost v = Viewer();
+        string kind = Kind(a, "kind", true), name = Json.Str(a, "name");
+        if (string.IsNullOrEmpty(name)) throw new ToolError("name is required");
+        Labels lb = CurrentLabels();
+        string joint = name;
+        if (kind == "area")
+        {
+            List<int> ids;
+            if (!lb.ByName.TryGetValue("area|" + name, out ids)) throw new ToolError("area '" + name + "' is not in the viewer's mesh");
+            return v.Command("focus", Json.O("kind", "elem", "id", ids[0]), TimeSpan.FromSeconds(30));
+        }
+        if (kind == "frame" || kind == "link")
+            joint = ctx.Sap.Read("viewer_focus", delegate(SapRead r)
+            {
+                string[] p = r.Objects().PointsOf(kind, name);
+                if (p.Length == 0) throw new ToolError("no " + kind + " '" + name + "'");
+                return p[0];
+            });
+        List<int> nid;
+        if (!lb.ByName.TryGetValue("joint|" + joint, out nid)) throw new ToolError("joint '" + joint + "' is not in the viewer's mesh");
+        return v.Command("focus", Json.O("kind", "node", "id", nid[0]), TimeSpan.FromSeconds(30));
+    }
+
+    object ViewerSelection(Dictionary<string, object> a)
+    {
+        ViewerHost v = Viewer();
+        Dictionary<string, object> st = v.Command("state", null, TimeSpan.FromSeconds(20)) as Dictionary<string, object>;
+        Dictionary<string, object> r = Json.O("state", st);
+        Dictionary<string, object> ro = st == null ? null : Json.Obj(st, "readout");
+        if (ro != null && v.LoadedBase != null)
+        {
+            Labels lb = CurrentLabels();
+            string el = Json.Str(ro, "element") ?? "", nd = Json.Str(ro, "node") ?? "";
+            System.Text.RegularExpressions.Match me = System.Text.RegularExpressions.Regex.Match(el, @"^\s*(\d+)");
+            string sap;
+            if (me.Success)
+            {
+                string kind = el.Contains("beam idx") ? "frame" : "area";
+                if (lb.ById.TryGetValue(kind + "|" + me.Groups[1].Value, out sap)) r["sapObject"] = Json.O("kind", kind, "name", sap);
+            }
+            System.Text.RegularExpressions.Match mn = System.Text.RegularExpressions.Regex.Match(nd, @"^\s*(\d+)");
+            if (mn.Success && lb.ById.TryGetValue("joint|" + mn.Groups[1].Value, out sap)) r["sapJoint"] = sap;
+        }
+        if (st != null && !Json.Bool(st, "pinned", false)) r["note"] = "nothing pinned: the user clicks a point in the viewer to pin it";
+        return r;
+    }
+
+    // After run_analysis: re-export and reload when a viewer is connected (update_viewer, default true).
+    void UpdateViewerAfterRun(Dictionary<string, object> a, Dictionary<string, object> run)
+    {
+        ViewerHost v = ctx.Viewer(false);
+        if (v == null || !v.Connected || !Json.Bool(a, "update_viewer", true)) return;
+        try
+        {
+            Dictionary<string, object> load = (Dictionary<string, object>)ViewerLoad(Json.O("export", true));
+            run["viewer"] = Json.O("reloaded", load["loaded"]);
+        }
+        catch (Exception e) { run["viewerError"] = e.Message; }
     }
 
     // ---------------------------------------------------------------- phase 3 handlers
