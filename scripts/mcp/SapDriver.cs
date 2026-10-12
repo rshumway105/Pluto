@@ -324,7 +324,9 @@ public sealed class SapDriver : IModelDriver
             finally { if (!dryRun) rd.Invalidate(); }
             r["dryRun"] = dryRun;
             List<object> changes = r.ContainsKey("changes") ? r["changes"] as List<object> : null;
-            if (!dryRun)
+            bool refused = r.ContainsKey("applied") && false.Equals(r["applied"]);   // the edit's own checks stopped it
+            if (refused) { r["checkpoint"] = ck.Name; r["dryRun"] = true; }
+            else if (!dryRun)
             {
                 s.Model.View.RefreshView(0, false);
                 List<object> logged = changes == null || changes.Count <= LogChanges ? changes : changes.GetRange(0, LogChanges);
@@ -340,7 +342,7 @@ public sealed class SapDriver : IModelDriver
                 r["note"] = note + "run_analysis runs " + ck.Name + "; revert goes back.";
                 if (ck.Adopted != null) r["adopted"] = "SAP2000 held " + ck.Adopted + " (not opened through open_model): saved as r000.sdb in a new session first";
             }
-            else r["note"] = "dry run: nothing changed" + (s.Model.GetModelIsLocked() ? "; applying it clears the model's results (the run checkpoint keeps them)" : "");
+            else if (!refused) r["note"] = "dry run: nothing changed" + (s.Model.GetModelIsLocked() ? "; applying it clears the model's results (the run checkpoint keeps them)" : "");
             if (changes != null && changes.Count > ReplyChanges) { r["changes"] = changes.GetRange(0, ReplyChanges); r["changesListed"] = ReplyChanges; }
             return r;
         });

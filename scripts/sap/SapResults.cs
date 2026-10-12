@@ -121,11 +121,22 @@ public class SapResults
 
     public string[] Combos() { int n = 0; string[] a = null; M.RespCombo.GetNameList(ref n, ref a); return a ?? new string[0]; }
 
-    // Names or * / ? patterns over cases and combos; null: every finished case and every combo.
+    // Modal / buckling cases the last default ResolveCases left out (their mode shapes have no physical scale or sign).
+    public List<string> ShapeCasesLeftOut = new List<string>();
+    public const string ShapeCasesNote = "modal / buckling cases left out: mode shapes have arbitrary scale and sign. Name them in cases to see them.";
+
+    // Names or * / ? patterns over cases and combos; null: every finished case except modal / buckling ones (listed in
+    // ShapeCasesLeftOut), and every combo.
     public List<string> ResolveCases(IList<string> patterns)
     {
         List<string> cases = new List<string>(), combos = new List<string>(Combos()), r = new List<string>();
-        foreach (KeyValuePair<string, int> kv in s.CaseStatus()) if (patterns != null || kv.Value == 4) cases.Add(kv.Key);
+        ShapeCasesLeftOut = new List<string>();
+        foreach (KeyValuePair<string, int> kv in s.CaseStatus())
+        {
+            if (patterns != null) { cases.Add(kv.Key); continue; }
+            if (kv.Value != 4) continue;
+            if (IsShapeCase(kv.Key)) ShapeCasesLeftOut.Add(kv.Key); else cases.Add(kv.Key);
+        }
         if (patterns == null) { r.AddRange(cases); r.AddRange(combos); return r; }
         foreach (string p in patterns)
         {
@@ -135,6 +146,13 @@ public class SapResults
             if (r.Count == before) throw new ArgumentException("no load case or combination '" + p + "'");
         }
         return r;
+    }
+
+    bool IsShapeCase(string c)
+    {
+        eLoadCaseType t = eLoadCaseType.LinearStatic; int sub = 0;
+        M.LoadCases.GetTypeOAPI(c, ref t, ref sub);
+        return t == eLoadCaseType.Modal || t == eLoadCaseType.Buckling;
     }
 
     // Selects cases / combos for output. Nonlinear and multi-step static cases give their last step;
@@ -162,12 +180,19 @@ public class SapResults
         public double[] V;
     }
 
+    // "Mode 3", "Step 12"; Max / Min and steps without a number ("Last Step") as they are.
+    static string StepLabel(string type, double num)
+    {
+        if (string.IsNullOrEmpty(type)) return null;
+        return type == "Max" || type == "Min" || num == 0 ? type : type + " " + num.ToString(Inv);
+    }
+
     static Row MakeRow(string obj, string at, string c, string[] st, double[] sn, int i, params double[] v)
     {
         Row r = new Row();
         r.Obj = obj; r.At = at; r.Case = c; r.V = v;
         string t = st == null || i >= st.Length ? "" : st[i] ?? "";
-        r.Step = t.Length == 0 ? null : (t == "Max" || t == "Min") ? t : (t + " " + sn[i].ToString(Inv)).Trim();
+        r.Step = StepLabel(t, sn == null || i >= sn.Length ? 0 : sn[i]);
         return r;
     }
 
@@ -257,6 +282,7 @@ public class SapResults
         int qi = QIndex(qs, q.Quantity);
         List<string> cases = ResolveCases(q.Cases);
         Dictionary<string, object> r = O("kind", q.Kind, "quantity", qs[qi], "units", s.Units(), "axes", Axes(q.Kind), "cases", cases);
+        if (ShapeCasesLeftOut.Count > 0) r["leftOut"] = O("cases", ShapeCasesLeftOut, "why", ShapeCasesNote);
         if (cases.Count == 0) { r["note"] = "no case has results: run_analysis first"; return r; }
         List<Row> rows = Fetch(q.Kind, cases);
         if (q.Only != null) rows = rows.FindAll(delegate(Row x) { return q.Only.Contains(x.Obj); });
@@ -391,6 +417,7 @@ public class SapResults
         List<string> cases = ResolveCases(casePatterns);
         Dictionary<string, object> r = O("units", s.Units(), "tolerance", tolerance,
             "signs", "reaction = force the supports apply to the structure; balanced when applied + reaction is about 0");
+        if (ShapeCasesLeftOut.Count > 0) r["leftOut"] = O("cases", ShapeCasesLeftOut, "why", ShapeCasesNote);
         if (cases.Count == 0) { r["note"] = "no case has results: run_analysis first"; return r; }
         Select(cases);
         int n = 0; string[] cas = null, st = null; double[] sn = null, fx = null, fy = null, fz = null, mx = null, my = null, mz = null;
@@ -402,7 +429,7 @@ public class SapResults
         List<object> list = new List<object>();
         for (int i = 0; i < n; i++)
         {
-            string step = st == null || string.IsNullOrEmpty(st[i]) ? null : st[i];
+            string step = StepLabel(st == null ? null : st[i], sn == null ? 0 : sn[i]);
             Dictionary<string, object> d = O("case", cas[i], "step", step,
                 "reaction", O("FX", fx[i], "FY", fy[i], "FZ", fz[i], "MX", mx[i], "MY", my[i], "MZ", mz[i]));
             Load a = step == "Min" || step == "Max" ? Load.Unsupported("an envelope (" + step + ") is not one load state") : loads.ForCase(cas[i]);

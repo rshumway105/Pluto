@@ -13,7 +13,7 @@ checkpoints, run it, query results at full precision, round-trip input tables th
 the Pluto viewer live. It is a C# 5 exe built on the one SAP controller
 ([[vault/arms/sap-controller|sap-controller]]); it adds argument checks, paging, files, checkpoints
 and the change log, never a second driver. The plan, decisions and per-phase test records are in
-[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.6.0,
+[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.7.0,
 SAP2000 26.3, development machine.
 
 ```text
@@ -63,11 +63,23 @@ SAP2000 26.3, development machine.
 > | select | `select_objects`, `describe_levels` | objects by Z range, box, plane, section, group, name (combined); `save_as` a selection, `show_in_sap`; floor elevations from Z clusters, grid lines and level-named groups | `SapRead` |
 > | tables | `read_table` | any `DatabaseTables` input table, filtered, paged (display-rounded: input only) | `SapSession.TableRows` |
 > | run | `run_analysis` | new checkpoint, run, case status, log warnings, equilibrium, largest values; saves envelopes | `SapResults`, `SapDriver.RunAnalysis` |
-> | results | `query_results`, `reactions_summary`, `compare_runs` | top N / envelope / per case / per group at full precision; base reactions against the applied load; biggest changes between two runs | `SapResults` |
-> | edit | `set_frame_section`, `set_area_section`, `set_link_property`, `set_material_property`, `set_restraint`, `set_frame_release`, `assign_joint_load`, `assign_frame_load`, `assign_area_load`, `define_load_pattern`, `define_load_case`, `define_combo`, `set_group`, `move_joints`, `add_frame`, `delete_objects` | targeted edits by names, group or saved selection; before → after; `dry_run` | `SapEdit` |
+> | results | `query_results`, `reactions_summary`, `compare_runs` | top N / envelope / per case / per group at full precision; base reactions against the applied load; biggest changes between two runs. Modal / buckling cases are left out unless named (mode shapes have no scale) | `SapResults` |
+> | edit | `set_frame_section`, `set_area_section`, `set_link_property`, `set_material_property`, `set_restraint`, `set_frame_release`, `assign_joint_load`, `assign_frame_load`, `assign_area_load`, `define_load_pattern`, `define_load_case`, `define_combo`, `set_group`, `move_joints`, `add_frame`, `delete_objects` | targeted edits by names, group or saved selection; before → after; `dry_run`. `move_joints` takes one rule for a whole shape change (below) | `SapEdit` |
 > | history | `list_checkpoints`, `revert`, `get_change_log` | checkpoints with run status and edits; reopen one; the edit log | `SapDriver` |
 > | Excel | `export_tables`, `import_tables` | input tables to a workbook the user edits, then back as one import (dry run by default) | `SapTables`, `ExcelTables` |
 > | viewer | `export_viewer`, `viewer_open`, `viewer_load`, `viewer_show`, `viewer_highlight`, `viewer_isolate`, `viewer_focus`, `viewer_get_selection` | `.bin` + `.features.json` export; the live viewer: load over HTTP Range, component / case, paint / isolate / focus objects, read back what the user pinned | `SapExport` (via `Run-Sap.ps1`), `ViewerHost`, `viewer/scripts/live.js` |
+>
+> **`move_joints` (0.7.0): one rule, checked before it is applied.** Rules: `delta`, `to` (one joint),
+> `scale` about `about` (e.g. every height × 0.8: `scale [1, 1, 0.8]`, `about [0, 0, 0]`), or `map`
+> `{axis, from, to}` (piecewise-linear old levels → new levels; joints outside `from`'s range stay). Targets:
+> names, group, selection and / or `z_min` / `z_max`. The server computes every coordinate; the dry run
+> reports `checks`: frames / links that collapse or reverse, areas that flip, joints that land on another
+> joint (any of these blocks the edit unless `force`), and `leftBehind`, the joints connected to moved ones
+> that the rule would also move but that were not targeted (the forgotten ring). It also gives
+> `estimatedSeconds`: SAP2000 takes about 0.1 s per coordinate change, an edit at most 15 minutes (about
+> 8000 joints), so bigger moves go in Z bands. Why: a squash of the example tank done as 24 per-ring
+> `move_joints` calls left the top roof ring and apex behind; as one `scale` call it moves all 901 joints
+> with clean checks.
 >
 > Not covered by a dedicated tool: editing non-static load cases, ETABS / SAFE (planned behind the
 > same tool names). `read_table` reads anything; `export_tables` / `import_tables` edit anything a
@@ -130,10 +142,17 @@ SAP2000 26.3, development machine.
 > - SAP2000's own displays (force diagrams, deformed shape) cannot be switched over the API; views are
 >   driven in the Pluto viewer, SAP2000 shows selections and edits.
 > - A modal dialog in SAP2000 blocks the API.
+> - Time histories come back as envelopes (Max / Min); there is no step-by-step history ("when is the peak").
+> - Joint moves cost SAP2000 about 0.1 s each (probed 2026-10-12: one `EditGeneral.Move` of a selected band
+>   is only ~2.6× faster). A Joint Coordinates table import would be faster but fails, and leaves tables
+>   unreadable, in a SAP2000 that has imported a `.s2k`, so it is not used for moves in the user's SAP2000.
 > - `export_viewer` runs `Run-Sap.ps1 -Export` as a child process (the lib needs Excel interop, so
 >   `SapToPluto` is not compiled into the exe).
+> - Checked against hand values (2026-10-12, own SAP2000): `set_material_property` (weight and E on a plate:
+>   DEAD 15 → 30 kip, SDL deflection halved), area loads (gravity and X), a response spectrum (one-mass
+>   cantilever, flat 0.5 g: T 0.195217 s, base shear 16.087 kip) and a linear modal time history (step load:
+>   peak tip displacement 2F/k, base shear 2F).
 > - Not yet tried: a user's click read back through `viewer_get_selection`; a multi-GB `.bin` over
 >   HTTP Range; a large model (index and export time, a `run_analysis` longer than the client's tool
->   timeout); response-spectrum and time-history cases in `query_results` / `reactions_summary`;
->   `set_material_property` and area loads against hand values; SAP2000 22 (the production machine).
+>   timeout); SAP2000 22 (the production machine).
 > - Data: model data goes to the LLM provider during a session. The work dir is outside the repo.

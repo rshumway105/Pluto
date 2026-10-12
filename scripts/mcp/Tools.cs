@@ -368,15 +368,38 @@ public sealed class ToolSet
                 "add_group", Prop("string", "Group whose members are added."), "dry_run", DryRun),
             SetGroup);
 
-        Add("move_joints", "Moves joints by delta [dx, dy, dz] (global), or one joint to [x, y, z]. Connected objects follow." + EditNote,
+        Add("move_joints", "Moves joints by ONE rule in one call; for a shape change (stretch, squash, re-level) give the rule, not a call per " +
+            "level: delta [dx, dy, dz] (translate), to [x, y, z] (one joint), scale [sx, sy, sz] about [x, y, z] (e.g. heights x 0.8 about " +
+            "the base: scale [1, 1, 0.8], about [0, 0, 0]), or map {axis, from, to} (piecewise-linear: old levels -> new levels; outside " +
+            "from's range a joint stays). The server computes every coordinate. Targets: names, group, selection and / or z_min / z_max " +
+            "(all combined). Checks before applying: frames / links collapsing or reversing, areas flipping, joints landing on " +
+            "others (any of these blocks the edit unless force), and leftBehind: joints connected to the moved ones that the rule " +
+            "would also move but were not targeted. Dry-run first and show the user the checks. Connected objects follow." + EditNote,
             Schema(Cat(Targets("joint"), new object[] {
+                "z_min", Prop("number", "Target joints with Z >= z_min (global; combined with the other targets)."),
+                "z_max", Prop("number", "Target joints with Z <= z_max."),
                 "delta", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[dx, dy, dz]."),
                 "to", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[x, y, z] for one joint."),
+                "scale", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[sx, sy, sz] factors about 'about'."),
+                "about", Json.O("type", "array", "items", Json.O("type", "number"), "minItems", 3, "maxItems", 3, "description", "[x, y, z] fixed point of scale (default origin)."),
+                "map", Json.O("type", "object", "description", "{\"axis\": \"x\"|\"y\"|\"z\", \"from\": [old levels, increasing], \"to\": [new levels]}.",
+                    "properties", Json.O("axis", Json.O("type", "string", "enum", new[] { "x", "y", "z" }),
+                        "from", Json.O("type", "array", "items", Json.O("type", "number")), "to", Json.O("type", "array", "items", Json.O("type", "number")))),
+                "force", Prop("boolean", "Apply even when the checks find collapsed, reversed, flipped or coincident geometry."),
                 "dry_run", DryRun })),
             delegate(Dictionary<string, object> a)
             {
-                double[] delta = Json.Nums(a, "delta"), to = Json.Nums(a, "to");
-                return Edit("move_joints", a, "joint", delegate(SapEdit e, List<string> t, bool d) { return e.MoveJoints(t, delta, to, d); });
+                SapEdit.JointRule rule = new SapEdit.JointRule();
+                rule.Delta = Json.Nums(a, "delta"); rule.To = Json.Nums(a, "to"); rule.Scale = Json.Nums(a, "scale"); rule.About = Json.Nums(a, "about");
+                Dictionary<string, object> map = Json.Obj(a, "map");
+                if (map != null)
+                {
+                    rule.MapAxis = "xyz".IndexOf((Json.Str(map, "axis") ?? "").ToLowerInvariant());
+                    if (rule.MapAxis < 0 || (Json.Str(map, "axis") ?? "").Length != 1) throw new ToolError("map.axis is x, y or z");
+                    rule.MapFrom = Json.Nums(map, "from"); rule.MapTo = Json.Nums(map, "to");
+                }
+                bool force = Json.Bool(a, "force", false);
+                return Edit("move_joints", a, "joint", delegate(SapEdit e, List<string> t, bool d) { return e.MoveJoints(t, rule, force, d); });
             });
 
         Add("add_frame", "Adds a frame between joints i and j, or between points from and to (joints made where none exists), with a section." + EditNote,
@@ -1347,15 +1370,23 @@ public sealed class ToolSet
     {
         string[] names = Json.Strs(a, "names");
         string group = Json.Str(a, "group");
-        if (names == null && group == null && saved == null) throw new ToolError("say which " + kind + "s: names, group or selection");
+        double? zMin = kind == "joint" ? Json.Num(a, "z_min") : null, zMax = kind == "joint" ? Json.Num(a, "z_max") : null;
+        if (names == null && group == null && saved == null && zMin == null && zMax == null)
+            throw new ToolError("say which " + kind + "s: names, group or selection" + (kind == "joint" ? " (or z_min / z_max)" : ""));
         SapRead.Index x = r.Objects();
         List<string> all = x.Names(kind);
         HashSet<string> set = null;
+        if (zMin != null || zMax != null)
+        {
+            double tol = 1e-6 * r.LargestExtent(), lo = (zMin ?? double.MinValue) - tol, hi = (zMax ?? double.MaxValue) + tol;
+            set = new HashSet<string>(all.FindAll(delegate(string n) { double z = x.Xyz[n][2]; return z >= lo && z <= hi; }));
+        }
         if (names != null)
         {
             HashSet<string> known = new HashSet<string>(all);
             foreach (string n in names) if (!known.Contains(n)) throw new ToolError("no " + kind + " '" + n + "'");
-            set = new HashSet<string>(names);
+            HashSet<string> nm = new HashSet<string>(names);
+            if (set == null) set = nm; else set.IntersectWith(nm);
         }
         if (group != null)
         {

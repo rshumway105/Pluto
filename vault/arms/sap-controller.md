@@ -42,7 +42,7 @@ This is the only route that runs on the production machine (SAP 22, no Python). 
 | model overview: units, counts, extent, supports, properties with use counts, groups, patterns, cases, combos | `SapRead.Describe` | `-Describe <json>` | MCP `describe_model` |
 | list objects, one object in full, sections, materials, cases, combos, select by geometry / attributes, levels | `SapRead` | (MCP server only) | MCP phase 1 tools |
 | run chosen cases (+ their initial cases), report status and log warnings; query results (top N, controlling case, per group); base reactions vs applied load; per-run envelopes, compare two runs | `SapResults` | (MCP server only) | MCP `run_analysis`, `query_results`, `reactions_summary`, `compare_runs` |
-| edit the model (targeted, before -> after, dry run) | `SapEdit` | (MCP server only) | MCP phase 3 edit tools |
+| edit the model (targeted, before -> after, dry run); move joints by one rule (delta, scale, level map) with geometry checks (collapsed, reversed, flipped, coincident, left behind) | `SapEdit`, `SapEdit.MoveJoints` + `JointRule` | (MCP server only) | MCP phase 3 edit tools, `move_joints` |
 | replace and import whole input tables | `SapTables.Read`, `Apply` | (MCP server only) | MCP `export_tables` / `import_tables` |
 | attach to one SAP2000 process (GetActiveObject finds only the first) | `SapSession.AttachProcess(pid)`, `ProcessId` of a started one | `-AttachPid <pid>` | MCP `export_viewer` with an own instance |
 | load tables read in full: every pattern, case and combination selected for display first | `SelectAllForDisplay` (in `TableRows`) | | `read_table` |
@@ -59,6 +59,7 @@ groups, units, cases, output paths). Steps run in a fixed order: attach → open
 
 - Stamp generated `.s2k` with the attached SAP's `Version()`: SAP 26 imports nothing from a file stamped 22.0.0, and `OpenFile` still returns 0.
 - `RunAnalysis` needs a saved model and writes it. Use `RunOnCopy` when the opened file must stay untouched.
+- Moving a joint (`EditPoint.ChangeCoordinates_1`, noRefresh) costs about 0.1 s (110 ms on the example tank); `SelectObj.CoordinateRange` + one `EditGeneral.Move` of a 36-joint band took 1.5 s, only ~2.6x faster (SAP 26.3, 2026-10-12).
 - GUI selection per object (`*Obj.SetSelected`) costs about 30 ms an object (SAP 26.3, 2026-10-12); `SelectObj.Group` selects a whole group in one call. Reading is far cheaper: indexing 2.8k objects takes 0.4 s.
 - Saving a model that has results under a new name (`File.Save(newPath)`) copies the model only: the old file keeps its result files and reopens with its results (SAP 26.3, 2026-10-12). The MCP checkpoints rely on this.
 - Load tables (pattern / case / combination definitions, loads per pattern) list only what is selected for display, and through the API nothing is: "Load Pattern Definitions" read 0 rows until `SetLoadPatternsSelectedForDisplay` (SAP 26.3, 2026-10-12).

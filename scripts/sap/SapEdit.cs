@@ -476,22 +476,266 @@ public class SapEdit
         return 1;
     }
 
-    // Moves joints by delta (global), or one joint to xyz. Connected objects follow.
-    public Dictionary<string, object> MoveJoints(IList<string> joints, double[] delta, double[] to, bool dryRun)
+    // Where a move_joints rule puts a joint: exactly one of Delta (translate), To (one joint), Scale about About
+    // (default the origin), or a piecewise-linear map of one axis (MapAxis 0..2, MapFrom strictly increasing -> MapTo;
+    // a coordinate outside MapFrom's range is not mapped).
+    public sealed class JointRule
     {
-        if ((delta == null) == (to == null)) throw new ArgumentException("give either delta [dx, dy, dz] or to [x, y, z]");
-        if (to != null && joints.Count != 1) throw new ArgumentException("'to' moves one joint; use delta for several");
+        public double[] Delta, To, Scale, About, MapFrom, MapTo;
+        public int MapAxis = -1;
+        public double Tol;   // a coordinate this close outside the map's range counts as its end
+
+        public string Check()
+        {
+            int n = (Delta != null ? 1 : 0) + (To != null ? 1 : 0) + (Scale != null ? 1 : 0) + (MapAxis >= 0 ? 1 : 0);
+            if (n != 1) return "give one rule: delta [dx, dy, dz], to [x, y, z], scale [sx, sy, sz] (about [x, y, z]) or map {axis, from, to}";
+            if (About != null && Scale == null) return "about goes with scale";
+            if (MapAxis >= 0)
+            {
+                if (MapFrom == null || MapTo == null || MapFrom.Length < 2 || MapFrom.Length != MapTo.Length) return "map needs from and to of the same length (at least 2)";
+                for (int i = 1; i < MapFrom.Length; i++) if (!(MapFrom[i] > MapFrom[i - 1])) return "map.from must be strictly increasing";
+            }
+            return null;
+        }
+
+        public string Describe()
+        {
+            if (Delta != null) return F("delta [{0}, {1}, {2}]", Delta[0], Delta[1], Delta[2]);
+            if (To != null) return F("to [{0}, {1}, {2}]", To[0], To[1], To[2]);
+            if (Scale != null) { double[] a = About ?? new double[3]; return F("scale [{0}, {1}, {2}] about [{3}, {4}, {5}]", Scale[0], Scale[1], Scale[2], a[0], a[1], a[2]); }
+            return "map " + "xyz"[MapAxis] + " [" + Join(MapFrom) + "] -> [" + Join(MapTo) + "]";
+        }
+
+        static string Join(double[] v) { string[] s = new string[v.Length]; for (int i = 0; i < v.Length; i++) s[i] = v[i].ToString("G10", Inv); return string.Join(", ", s); }
+
+        // New coordinates, or null when the rule does not place this joint (outside the map's range).
+        public double[] Apply(double[] c)
+        {
+            if (Delta != null) return new double[] { c[0] + Delta[0], c[1] + Delta[1], c[2] + Delta[2] };
+            if (To != null) return (double[])To.Clone();
+            if (Scale != null)
+            {
+                double[] a = About ?? new double[3];
+                return new double[] { a[0] + Scale[0] * (c[0] - a[0]), a[1] + Scale[1] * (c[1] - a[1]), a[2] + Scale[2] * (c[2] - a[2]) };
+            }
+            double v = c[MapAxis];
+            int last = MapFrom.Length - 1;
+            if (v < MapFrom[0] - Tol || v > MapFrom[last] + Tol) return null;
+            v = Math.Max(MapFrom[0], Math.Min(MapFrom[last], v));
+            int k = 0;
+            while (k < last - 1 && v > MapFrom[k + 1]) k++;
+            double t = (v - MapFrom[k]) / (MapFrom[k + 1] - MapFrom[k]);
+            double[] n = (double[])c.Clone();
+            n[MapAxis] = MapTo[k] + t * (MapTo[k + 1] - MapTo[k]);
+            return n;
+        }
+    }
+
+    // Moves joints by one rule (JointRule). Connected objects follow. Before anything is applied the final geometry is
+    // checked: frames / links that collapse to zero length or reverse, areas that flip or degenerate, joints that land on
+    // another joint (each only when it was not so before), and joints connected to the moved ones that the rule would
+    // also move but that were not among the targets (leftBehind: usually a forgotten ring or level). Collapsed, reversed,
+    // flipped or coincident results are not applied unless force. A joint SAP2000 refuses because another joint is still
+    // in the way is retried after the others have moved.
+    const double SecondsPerJoint = 0.11;
+
+    public Dictionary<string, object> MoveJoints(IList<string> joints, JointRule rule, bool force, bool dryRun)
+    {
+        string bad = rule.Check();
+        if (bad != null) throw new ArgumentException(bad);
+        if (rule.To != null && joints.Count != 1) throw new ArgumentException("'to' moves one joint; use delta, scale or map for several");
         SapRead.Index x = read.Objects();
-        Edits e = new Edits();
+        double tol = Math.Max(1e-6 * read.LargestExtent(), 1e-12);
+        rule.Tol = tol;
+
+        Dictionary<string, double[]> moved = new Dictionary<string, double[]>();
+        int outside = 0, unchanged = 0;
         foreach (string j in joints)
         {
-            double[] c = x.Xyz[j];
-            double[] n = to != null ? to : new double[] { c[0] + delta[0], c[1] + delta[1], c[2] + delta[2] };
-            if (n[0] == c[0] && n[1] == c[1] && n[2] == c[2]) { e.Unchanged++; continue; }
-            if (!dryRun && M.EditPoint.ChangeCoordinates_1(j, n[0], n[1], n[2], true) != 0) { e.Fail(j, "ChangeCoordinates refused (another joint there?)"); continue; }
-            e.Add("joint", j, c, n);
+            double[] c = x.Xyz[j], n = rule.Apply(c);
+            if (n == null) { outside++; continue; }
+            if (Dist(c, n) <= tol) { unchanged++; continue; }
+            moved[j] = n;
         }
-        return e.Reply("move joints", dryRun);
+
+        bool blocking;
+        Dictionary<string, object> checks = MoveChecks(x, moved, rule, new HashSet<string>(joints), tol, out blocking);
+
+        Edits e = new Edits();
+        e.Unchanged = unchanged;
+        bool apply = !dryRun && !(blocking && !force);
+        List<string> todo = new List<string>(moved.Keys);
+        int passes = 0;
+        if (apply)
+        {
+            while (todo.Count > 0 && passes < 10)
+            {
+                passes++;
+                List<string> refused = new List<string>();
+                foreach (string j in todo)
+                {
+                    double[] n = moved[j];
+                    if (M.EditPoint.ChangeCoordinates_1(j, n[0], n[1], n[2], true) != 0) refused.Add(j);
+                }
+                if (refused.Count == todo.Count) break;
+                todo = refused;
+            }
+            foreach (string j in todo) e.Fail(j, "ChangeCoordinates refused (another joint there?)");
+        }
+        HashSet<string> failed = new HashSet<string>(apply ? todo : new List<string>());
+        foreach (KeyValuePair<string, double[]> kv in moved)
+            if (!failed.Contains(kv.Key)) e.Add("joint", kv.Key, x.Xyz[kv.Key], kv.Value);
+
+        Dictionary<string, object> reply = e.Reply("move joints: " + rule.Describe(), !apply);
+        reply["checks"] = checks;
+        if (outside > 0) reply["outsideMap"] = outside;
+        if (!apply)
+        {
+            // SAP2000 26.3 takes about 0.1 s per coordinate change (2026-10-12); the server allows an edit 15 minutes
+            double est = Math.Round(moved.Count * SecondsPerJoint);
+            reply["estimatedSeconds"] = est;
+            if (est > 600) reply["timeWarning"] = "applying takes about " + est + " s; an edit may take at most 900 s. Split the targets into bands (z_min / z_max) with the same rule; the band edges then show as leftBehind until the next band is moved.";
+        }
+        if (passes > 1) reply["passes"] = passes;
+        if (!dryRun && !apply)
+        {
+            reply["applied"] = false;
+            reply["note"] = "NOT APPLIED: the checks found collapsed, reversed, flipped or coincident geometry (see checks). Change the rule or the targets, or pass force: true.";
+        }
+        return reply;
+    }
+
+    Dictionary<string, object> MoveChecks(SapRead.Index x, Dictionary<string, double[]> moved, JointRule rule, HashSet<string> targets, double tol, out bool blocking)
+    {
+        const int Cap = 50;
+        Func<string, double[]> before = delegate(string j) { return x.Xyz[j]; };
+        Func<string, double[]> after = delegate(string j) { double[] n; return moved.TryGetValue(j, out n) ? n : x.Xyz[j]; };
+        List<object> collapsed = new List<object>(), reversed = new List<object>(), flipped = new List<object>(), coincident = new List<object>();
+        int nCollapsed = 0, nReversed = 0, nFlipped = 0, nCoincident = 0;
+
+        foreach (string kind in new[] { "frame", "link" })
+            foreach (KeyValuePair<string, string[]> kv in kind == "frame" ? x.FrameEnds : x.LinkEnds)
+            {
+                string i = kv.Value[0], j = kv.Value[1];
+                if (!moved.ContainsKey(i) && !moved.ContainsKey(j)) continue;
+                double[] d0 = Sub(x.Xyz[j], x.Xyz[i]), d1 = Sub(after(j), after(i));
+                double l0 = Norm(d0), l1 = Norm(d1);
+                if (l1 <= tol && l0 > tol) { if (nCollapsed++ < Cap) collapsed.Add(O("kind", kind, "name", kv.Key, "lengthBefore", l0)); }
+                else if (l0 > tol && l1 > tol && Dot(d0, d1) < 0) { if (nReversed++ < Cap) reversed.Add(O("kind", kind, "name", kv.Key)); }
+            }
+        double atol = tol * tol;
+        foreach (KeyValuePair<string, string[]> kv in x.AreaPoints)
+        {
+            bool any = false;
+            foreach (string p in kv.Value) if (moved.ContainsKey(p)) { any = true; break; }
+            if (!any) continue;
+            double[] n0 = Newell(kv.Value, before), n1 = Newell(kv.Value, after);
+            double a0 = Norm(n0), a1 = Norm(n1);
+            if (a1 <= atol && a0 > atol) { if (nCollapsed++ < Cap) collapsed.Add(O("kind", "area", "name", kv.Key, "areaBefore", a0 / 2)); }
+            else if (a0 > atol && a1 > atol && Dot(n0, n1) < 0) { if (nFlipped++ < Cap) flipped.Add(O("kind", "area", "name", kv.Key)); }
+        }
+
+        // coincidence on a grid of cell = tol: each moved joint against every joint's final position
+        Dictionary<string, List<string>> grid = new Dictionary<string, List<string>>();
+        foreach (string j in x.Joints)
+        {
+            string key = Cell(after(j), tol, 0, 0, 0);
+            List<string> l;
+            if (!grid.TryGetValue(key, out l)) grid[key] = l = new List<string>();
+            l.Add(j);
+        }
+        foreach (KeyValuePair<string, double[]> kv in moved)
+            for (int a = -1; a <= 1; a++) for (int b = -1; b <= 1; b++) for (int c = -1; c <= 1; c++)
+            {
+                List<string> l;
+                if (!grid.TryGetValue(Cell(kv.Value, tol, a, b, c), out l)) continue;
+                foreach (string o in l)
+                {
+                    if (o == kv.Key || (moved.ContainsKey(o) && string.CompareOrdinal(o, kv.Key) < 0)) continue;
+                    if (Dist(after(o), kv.Value) > tol || Dist(x.Xyz[o], x.Xyz[kv.Key]) <= tol) continue;
+                    if (nCoincident++ < Cap) coincident.Add(new[] { kv.Key, o });
+                }
+            }
+
+        // joints next to moved ones that the rule would also move, but that were not targets
+        HashSet<string> left = new HashSet<string>();
+        if (rule.To == null && moved.Count > 0)
+        {
+            Dictionary<string, List<string>> adj = Adjacency(x);
+            foreach (string j in moved.Keys)
+            {
+                List<string> nb;
+                if (!adj.TryGetValue(j, out nb)) continue;
+                foreach (string o in nb)
+                {
+                    if (targets.Contains(o) || left.Contains(o)) continue;
+                    double[] n = rule.Apply(x.Xyz[o]);
+                    if (n != null && Dist(n, x.Xyz[o]) > tol) left.Add(o);
+                }
+            }
+        }
+
+        Dictionary<string, object> r = O("tolerance", tol,
+            "collapsed", O("count", nCollapsed, "items", collapsed), "reversed", O("count", nReversed, "items", reversed),
+            "flipped", O("count", nFlipped, "items", flipped), "coincident", O("count", nCoincident, "pairs", coincident));
+        if (left.Count > 0)
+        {
+            List<string> names = new List<string>(left);
+            double lo = double.MaxValue, hi = double.MinValue;
+            foreach (string o in names) { lo = Math.Min(lo, x.Xyz[o][2]); hi = Math.Max(hi, x.Xyz[o][2]); }
+            r["leftBehind"] = O("count", names.Count, "zRange", new[] { lo, hi }, "joints", names.Count > Cap ? names.GetRange(0, Cap) : names,
+                "note", rule.Delta != null
+                    ? "connected to moved joints and not moved: the objects between them stretch. Fine when moving one part; otherwise add them."
+                    : "connected to moved joints, not among the targets, and the rule would move them: probably forgotten. Add them (and dry-run again: their own neighbours may follow) or say why not.");
+        }
+        List<string> summary = new List<string>();
+        if (nCollapsed > 0) summary.Add(nCollapsed + " collapsed");
+        if (nReversed > 0) summary.Add(nReversed + " reversed");
+        if (nFlipped > 0) summary.Add(nFlipped + " flipped");
+        if (nCoincident > 0) summary.Add(nCoincident + " coincident");
+        if (left.Count > 0) summary.Add(left.Count + " left behind");
+        r["summary"] = summary.Count == 0 ? "geometry checks clean" : string.Join(", ", summary.ToArray());
+        blocking = nCollapsed + nReversed + nFlipped + nCoincident > 0;
+        return r;
+    }
+
+    static Dictionary<string, List<string>> Adjacency(SapRead.Index x)
+    {
+        Dictionary<string, List<string>> adj = new Dictionary<string, List<string>>();
+        Action<string, string> link = delegate(string a, string b)
+        {
+            List<string> l;
+            if (!adj.TryGetValue(a, out l)) adj[a] = l = new List<string>();
+            l.Add(b);
+        };
+        foreach (string[] e in x.FrameEnds.Values) { link(e[0], e[1]); link(e[1], e[0]); }
+        foreach (string[] e in x.LinkEnds.Values) { link(e[0], e[1]); link(e[1], e[0]); }
+        foreach (string[] p in x.AreaPoints.Values)
+            for (int i = 0; i < p.Length; i++) for (int k = 0; k < p.Length; k++) if (i != k) link(p[i], p[k]);
+        return adj;
+    }
+
+    static string Cell(double[] p, double h, int dx, int dy, int dz)
+    {
+        return ((long)Math.Floor(p[0] / h) + dx) + "," + ((long)Math.Floor(p[1] / h) + dy) + "," + ((long)Math.Floor(p[2] / h) + dz);
+    }
+    static double[] Sub(double[] a, double[] b) { return new double[] { a[0] - b[0], a[1] - b[1], a[2] - b[2] }; }
+    static double Dot(double[] a, double[] b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    static double Norm(double[] a) { return Math.Sqrt(Dot(a, a)); }
+    static double Dist(double[] a, double[] b) { return Norm(Sub(a, b)); }
+
+    // Newell normal of a polygon: its length is twice the polygon's area.
+    static double[] Newell(string[] pts, Func<string, double[]> xyz)
+    {
+        double[] n = new double[3];
+        for (int i = 0; i < pts.Length; i++)
+        {
+            double[] a = xyz(pts[i]), b = xyz(pts[(i + 1) % pts.Length]);
+            n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        return n;
     }
 
     // A frame between two joints (or two points: new joints are made where none exists), with a section.

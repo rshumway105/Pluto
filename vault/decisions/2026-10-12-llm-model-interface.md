@@ -358,3 +358,14 @@ the tool capability table by group with the controller class behind each, work d
 trip, isolation and tests, known limits), with its line in [[vault/arms/Arms map|Arms map]]. The Copilot item is dropped:
 Microsoft 365 Copilot cannot start a local stdio server and VS Code Copilot is not a target (`.vscode/mcp.json` stays).
 The client in use is Claude Desktop. Phases 0–5 are done; what remains is the untested list in the usage note.
+
+## 0.7.0 (2026-10-12): shape changes in one call
+
+A squash of the example tank asked through Claude Desktop took 48 tool calls (a select and a move per ring) with
+deltas Claude worked out itself, and left the top roof ring and the apex behind. `move_joints` now takes one rule
+(`scale` about a point, a level `map`, `delta`) over names / group / selection / Z range, computes every coordinate in
+the server, and checks the result before applying (collapsed, reversed, flipped, coincident: blocking; left-behind
+neighbours the rule would also move: reported). A tool for Claude to write table rows was considered and dropped:
+for geometry it has Claude emit every coordinate as text, the same failure. Modal and buckling cases are now left
+out of default result lists (their mode shapes dominated the maxima and `compare_runs`). Details in
+[[vault/arms/pluto-mcp|pluto-mcp]].
