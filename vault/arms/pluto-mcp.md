@@ -152,7 +152,10 @@ SAP2000 26.3, development machine.
 >   DEAD 15 → 30 kip, SDL deflection halved), area loads (gravity and X), a response spectrum (one-mass
 >   cantilever, flat 0.5 g: T 0.195217 s, base shear 16.087 kip) and a linear modal time history (step load:
 >   peak tip displacement 2F/k, base shear 2F).
-> - Not yet tried: a user's click read back through `viewer_get_selection`; a multi-GB `.bin` over
+> - Checked by the user in Claude Desktop (2026-10-12): the live viewer follows Claude's viewer tools, and a shell
+>   the user clicked (pinned readout) is read back through `viewer_get_selection`.
+> - The live viewer opens Y-up; SAP2000 models need **Z up** ticked by hand (not yet set by `viewer_load`).
+> - Not yet tried: a multi-GB `.bin` over
 >   HTTP Range; a large model (index and export time, a `run_analysis` longer than the client's tool
 >   timeout); SAP2000 22 (the production machine).
 > - Data: model data goes to the LLM provider during a session. The work dir is outside the repo.

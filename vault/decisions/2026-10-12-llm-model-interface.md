@@ -369,3 +369,6 @@ neighbours the rule would also move: reported). A tool for Claude to write table
 for geometry it has Claude emit every coordinate as text, the same failure. Modal and buckling cases are now left
 out of default result lists (their mode shapes dominated the maxima and `compare_runs`). Details in
 [[vault/arms/pluto-mcp|pluto-mcp]].
+
+Phase 4's open item closed the same day: in Claude Desktop the user clicked a shell in the live viewer and Claude read
+it back through `viewer_get_selection`; the viewer followed every viewer tool.
