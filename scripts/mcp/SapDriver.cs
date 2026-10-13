@@ -60,7 +60,8 @@ public sealed class SapDriver : IModelDriver
             "export_viewer", "SapExport -> SapToPluto through Run-Sap.ps1 -Export: .bin + .features.json",
             "edit_model", "targeted tools (sections, properties, materials, restraints, releases, loads, patterns, cases, combos, groups, joint moves, frames, deletes), each into a checkpoint, logged, with dry_run",
             "tables_in_excel", "export_tables -> Excel -> import_tables (dry run first; into a checkpoint, unlocked, one import, its log)",
-            "revert", "reopens any checkpoint of the session; list_checkpoints, get_change_log");
+            "revert", "reopens any checkpoint of the session; list_checkpoints, get_change_log",
+            "design_notes", "log_note / list_notes: assumptions, conditions, decisions, questions with their basis (notes.jsonl); every edit takes an optional reason");
     }
 
     // PLUTO_SAP_INSTANCE=new: the server starts a SAP2000 of its own and closes it on exit (tests that must not touch the
@@ -333,6 +334,8 @@ public sealed class SapDriver : IModelDriver
                 Dictionary<string, object> line = Json.O("utc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv), "checkpoint", ck.Name,
                     "tool", tool, "args", args, "edit", r.ContainsKey("edit") ? r["edit"] : null, "changed", changes == null ? 0 : changes.Count, "changes", logged);
                 if (r.ContainsKey("failed")) line["failed"] = r["failed"];
+                string reason = Json.Str(args, "reason");
+                if (!string.IsNullOrEmpty(reason)) line["reason"] = reason.Trim();
                 File.AppendAllText(Path.Combine(ck.Dir, "changes.jsonl"), Json.Write(line) + "\n");
                 log.Info(tool + " -> " + ck.Name + " (" + (changes == null ? 0 : changes.Count) + " changes)");
                 r["checkpoint"] = ck.Name;

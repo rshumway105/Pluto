@@ -13,7 +13,7 @@ checkpoints, run it, query results at full precision, round-trip input tables th
 the Pluto viewer live. It is a C# 5 exe built on the one SAP controller
 ([[vault/arms/sap-controller|sap-controller]]); it adds argument checks, paging, files, checkpoints
 and the change log, never a second driver. The plan, decisions and per-phase test records are in
-[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.7.0,
+[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.8.0,
 SAP2000 26.3, development machine.
 
 ```text
@@ -64,8 +64,9 @@ SAP2000 26.3, development machine.
 > | tables | `read_table` | any `DatabaseTables` input table, filtered, paged (display-rounded: input only) | `SapSession.TableRows` |
 > | run | `run_analysis` | new checkpoint, run, case status, log warnings, equilibrium, largest values; saves envelopes | `SapResults`, `SapDriver.RunAnalysis` |
 > | results | `query_results`, `reactions_summary`, `compare_runs` | top N / envelope / per case / per group at full precision; base reactions against the applied load; biggest changes between two runs. Modal / buckling cases are left out unless named (mode shapes have no scale) | `SapResults` |
-> | edit | `set_frame_section`, `set_area_section`, `set_link_property`, `set_material_property`, `set_restraint`, `set_frame_release`, `assign_joint_load`, `assign_frame_load`, `assign_area_load`, `define_load_pattern`, `define_load_case`, `define_combo`, `set_group`, `move_joints`, `add_frame`, `delete_objects` | targeted edits by names, group or saved selection; before → after; `dry_run`. `move_joints` takes one rule for a whole shape change (below) | `SapEdit` |
+> | edit | `set_frame_section`, `set_area_section`, `set_link_property`, `set_material_property`, `set_restraint`, `set_frame_release`, `assign_joint_load`, `assign_frame_load`, `assign_area_load`, `define_load_pattern`, `define_load_case`, `define_combo`, `set_group`, `move_joints`, `add_frame`, `delete_objects` | targeted edits by names, group or saved selection; before → after; `dry_run`; an optional `reason`, kept in the edit log. `move_joints` takes one rule for a whole shape change (below) | `SapEdit` |
 > | history | `list_checkpoints`, `revert`, `get_change_log` | checkpoints with run status and edits; reopen one; the edit log | `SapDriver` |
+> | design notes | `log_note`, `list_notes` | assumptions, conditions, decisions and questions (topic, basis, what they concern) in the session's `notes.jsonl`; a later note supersedes an earlier one, nothing is deleted. Feeds the design record ([[vault/decisions/2026-10-13-qa-records-and-bod-map\|plan]]) | `ToolSet` |
 > | Excel | `export_tables`, `import_tables` | input tables to a workbook the user edits, then back as one import (dry run by default) | `SapTables`, `ExcelTables` |
 > | viewer | `export_viewer`, `viewer_open`, `viewer_load`, `viewer_show`, `viewer_highlight`, `viewer_isolate`, `viewer_focus`, `viewer_get_selection` | `.bin` + `.features.json` export; the live viewer: load over HTTP Range, component / case, paint / isolate / focus objects, read back what the user pinned | `SapExport` (via `Run-Sap.ps1`), `ViewerHost`, `viewer/scripts/live.js` |
 >

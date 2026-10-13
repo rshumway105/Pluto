@@ -235,7 +235,7 @@ try {
         Check "run_analysis: the edited r001 runs in place" ($r1 -and $r1.checkpoint -eq "r001" -and $r1.from -like "edited*")
         $q = Tool "query_results" @{ kind = "frame"; quantity = "M3"; cases = @("PT"); top_n = 1 }
         Check "PT 20 kip at midspan: M3 = 100 kip-ft" ($q -and (Near ([Math]::Abs($q.top[0].value)) 100))
-        $e = Tool "set_restraint" @{ names = @("3"); fixed_dofs = @("U1", "U2", "U3", "R1") }
+        $e = Tool "set_restraint" @{ names = @("3"); fixed_dofs = @("U1", "U2", "U3", "R1"); reason = "bearing restrains torsion" }
         Check "set_restraint on a run checkpoint: new r002, r001 keeps its results" ($e -and $e.checkpoint -eq "r002" -and $e.note -like "*r001 keeps*")
         $e = Tool "assign_frame_load" @{ group = "ALL"; pattern = "PT"; type = "distributed"; dir = "gravity"; value = 1 }
         Check "assign_frame_load: both frames" ($e -and $e.changed -eq 2 -and $e.checkpoint -eq "r002")
@@ -266,8 +266,22 @@ try {
         Check ("list_checkpoints: " + (($lc.checkpoints | ForEach-Object { $_.checkpoint + $(if ($_.held) { "*" } else { "" }) + " edits " + [int]$_.editCount }) -join ", ")) ($lc -and $lc.checkpoints.Count -eq 4 -and ($lc.checkpoints | Where-Object held).checkpoint -eq "r001")
         $cl = Tool "get_change_log" @{}
         Check "get_change_log: every applied edit logged" ($cl -and $cl.total -eq 9)
+        Check "get_change_log: the edit's reason kept" (($cl.entries | Where-Object tool -eq "set_restraint").reason -eq "bearing restrains torsion")
+        Check "list_checkpoints: r002 lists the reason" ((($lc.checkpoints | Where-Object checkpoint -eq "r002").edits -join "|") -like "*because bearing restrains torsion*")
         $e = Tool "set_restraint" @{ names = @("1"); fixed_dofs = @("U1", "U2", "U3", "R1", "R2", "R3") }
         Check "an edit after revert starts a new checkpoint (r004), r001 untouched" ($e -and $e.checkpoint -eq "r004")
+        # design notes: the why beside the edits
+        $n1 = Tool "log_note" @{ kind = "assumption"; topic = "supports"; text = "Left support fixed: the beam is cast into the wall."; basis = "engineering judgement"; names = @("1") }
+        Check "log_note: n001 on r004" ($n1 -and $n1.logged.id -eq "n001" -and $n1.logged.checkpoint -eq "r004" -and $n1.logged.kind -eq "assumption")
+        $n2 = Tool "log_note" @{ kind = "question"; topic = "loads"; text = "Is PT a live or a dead load?" }
+        $n3 = Tool "log_note" @{ kind = "decision"; topic = "loads"; text = "PT is live (occupancy)."; basis = "supplied data"; supersedes = "n002" }
+        Check "log_note: a decision supersedes the question" ($n2 -and $n3 -and $n3.logged.id -eq "n003" -and $n3.logged.supersedes -eq "n002")
+        $null = Tool "log_note" @{ kind = "decision"; text = "again"; supersedes = "n002" } -ExpectError
+        $null = Tool "log_note" @{ kind = "guess"; text = "x" } -ExpectError
+        $ln = Tool "list_notes" @{}
+        Check "list_notes: superseded left out" ($ln -and $ln.total -eq 3 -and @($ln.notes).Count -eq 2 -and -not ($ln.notes | Where-Object id -eq "n002"))
+        $ln = Tool "list_notes" @{ topic = "loads"; superseded = $true }
+        Check "list_notes topic loads with superseded: n002 marked by n003" ($ln -and @($ln.notes).Count -eq 2 -and ($ln.notes | Where-Object id -eq "n002").supersededBy -eq "n003")
     }
     if ($Tables) {
         if (-not $beam) { throw "-Tables needs -SelfTest (it edits the self-test beam)" }

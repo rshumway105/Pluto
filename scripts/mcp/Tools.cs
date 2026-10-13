@@ -508,6 +508,40 @@ public sealed class ToolSet
                 "dry_run", Prop("boolean", "Only show the changes (default true)."),
                 "force", Prop("boolean", "Import even though the model's tables changed since the export.")),
             ImportTables);
+
+        // ------------------------------------------------ design record: why the model is as it is
+
+        Add("log_note", "Records an assumption, condition, decision or question about the model in the session's notes.jsonl, with " +
+            "its basis, so the design record can show why the model is as it is. Log what the user states or confirms; a note " +
+            "the LLM infers is logged only after the user agrees. supersedes: an earlier note this one replaces (a decision " +
+            "superseding a question answers it); nothing is deleted. Does not change the model.",
+            Schema(new[] { "kind", "text" },
+                "kind", Enum("assumption (taken as true without proof), condition (an underlying condition the design rests on: site, " +
+                    "existing structure, supplied data), decision (a choice made, and why), question (open, to be answered).", NoteKinds),
+                "text", Prop("string", "The note, one or two sentences."),
+                "topic", Enum("What it concerns.", NoteTopics),
+                "basis", Prop("string", "Where it comes from: code clause, drawing, report, supplied data, engineering judgement."),
+                "elements", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Design elements (BOD element note names) it concerns."),
+                "group", Prop("string", "SAP2000 group it concerns."),
+                "names", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Object names it concerns."),
+                "supersedes", Prop("string", "Id of an earlier note this one replaces (list_notes), e.g. n003."),
+                "session_dir", Prop("string", "Another session's folder (default: the current model's).")),
+            LogNote);
+
+        Add("list_notes", "The session's notes (log_note): id, kind, topic, text, basis, what they concern, checkpoint and time. " +
+            "Superseded notes are left out unless asked for (then marked with the note that replaced them). Read only.",
+            Schema("kind", Enum("Only this kind.", NoteKinds), "topic", Enum("Only this topic.", NoteTopics),
+                "superseded", Prop("boolean", "Include superseded notes (default false)."),
+                "session_dir", Prop("string", "Another session's folder (default: the current model's).")),
+            ListNotes);
+
+        // Every edit (the tools with dry_run) takes an optional reason, kept in changes.jsonl for the design record.
+        foreach (Tool t in tools)
+        {
+            Dictionary<string, object> p = Json.Obj(t.Schema, "properties");
+            if (p != null && p.ContainsKey("dry_run"))
+                p["reason"] = Prop("string", "Why the change is made (optional): logged with the edit for the design record.");
+        }
     }
 
     object Status(Dictionary<string, object> a)
@@ -1528,7 +1562,9 @@ public sealed class ToolSet
             string cp = Json.Str(e, "checkpoint") ?? "?";
             List<string> l;
             if (!edits.TryGetValue(cp, out l)) { l = new List<string>(); edits[cp] = l; }
-            l.Add(Json.Str(e, "tool") + ": " + (Json.Str(e, "edit") ?? "") + " (" + Convert.ToString(e.ContainsKey("changed") ? e["changed"] : 0, Json.Inv) + ")");
+            string why = Json.Str(e, "reason");
+            l.Add(Json.Str(e, "tool") + ": " + (Json.Str(e, "edit") ?? "") + " (" + Convert.ToString(e.ContainsKey("changed") ? e["changed"] : 0, Json.Inv) + ")" +
+                (why == null ? "" : " because " + why));
         }
         List<string> files = new List<string>(Directory.GetFiles(dir, "r*.sdb"));
         files.Sort(StringComparer.OrdinalIgnoreCase);
@@ -1591,6 +1627,95 @@ public sealed class ToolSet
             if (d != null) r.Add(d);
         }
         return r;
+    }
+
+    // ---------------------------------------------------------------- design record handlers
+
+    static readonly string[] NoteKinds = { "assumption", "condition", "decision", "question" };
+    static readonly string[] NoteTopics = { "geometry", "supports", "materials", "sections", "loads", "analysis", "results" };
+
+    static string OneOf(Dictionary<string, object> a, string key, string[] values, bool required)
+    {
+        string v = Json.Str(a, key);
+        if (v == null) { if (required) throw new ToolError(key + " is required: " + string.Join(", ", values)); return null; }
+        v = v.Trim().ToLowerInvariant();
+        if (Array.IndexOf(values, v) < 0) throw new ToolError(key + " must be one of " + string.Join(", ", values) + " (got '" + Json.Str(a, key) + "')");
+        return v;
+    }
+
+    object LogNote(Dictionary<string, object> a)
+    {
+        string kind = OneOf(a, "kind", NoteKinds, true), topic = OneOf(a, "topic", NoteTopics, false);
+        string text = (Json.Str(a, "text") ?? "").Trim();
+        if (text.Length == 0) throw new ToolError("text is required");
+        string dir = SessionDirFor(a), sup = Json.Str(a, "supersedes");
+        List<Dictionary<string, object>> notes = NoteLines(dir);
+        if (sup != null)
+        {
+            if (notes.Find(delegate(Dictionary<string, object> n) { return Json.Str(n, "id") == sup; }) == null)
+                throw new ToolError("no note " + sup + " in this session (list_notes)");
+            Dictionary<string, object> by = notes.Find(delegate(Dictionary<string, object> n) { return Json.Str(n, "supersedes") == sup; });
+            if (by != null) throw new ToolError(sup + " is already superseded by " + Json.Str(by, "id"));
+        }
+        Dictionary<string, object> note = Json.O("id", "n" + (notes.Count + 1).ToString("000", Json.Inv),
+            "utc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv), "checkpoint", HeldCheckpoint(dir),
+            "kind", kind, "topic", topic, "text", text, "basis", Json.Str(a, "basis"), "elements", Json.Strs(a, "elements"),
+            "group", Json.Str(a, "group"), "names", Json.Strs(a, "names"), "supersedes", sup);
+        foreach (string k in new List<string>(note.Keys)) if (note[k] == null) note.Remove(k);
+        string file = Path.Combine(dir, "notes.jsonl");
+        File.AppendAllText(file, Json.Write(note) + "\n");
+        return Json.O("logged", note, "file", file, "notes", notes.Count + 1);
+    }
+
+    object ListNotes(Dictionary<string, object> a)
+    {
+        string kind = OneOf(a, "kind", NoteKinds, false), topic = OneOf(a, "topic", NoteTopics, false);
+        bool superseded = Json.Bool(a, "superseded", false);
+        string dir = SessionDirFor(a);
+        List<Dictionary<string, object>> notes = NoteLines(dir);
+        Dictionary<string, string> replacedBy = new Dictionary<string, string>();
+        foreach (Dictionary<string, object> n in notes)
+        {
+            string s = Json.Str(n, "supersedes");
+            if (s != null) replacedBy[s] = Json.Str(n, "id");
+        }
+        List<object> list = new List<object>();
+        foreach (Dictionary<string, object> n in notes)
+        {
+            string by;
+            if (replacedBy.TryGetValue(Json.Str(n, "id") ?? "", out by)) { if (!superseded) continue; n["supersededBy"] = by; }
+            if (kind != null && Json.Str(n, "kind") != kind) continue;
+            if (topic != null && Json.Str(n, "topic") != topic) continue;
+            list.Add(n);
+        }
+        return Json.O("sessionDir", dir, "file", Path.Combine(dir, "notes.jsonl"), "total", notes.Count, "superseded", replacedBy.Count, "notes", list);
+    }
+
+    static List<Dictionary<string, object>> NoteLines(string dir)
+    {
+        List<Dictionary<string, object>> r = new List<Dictionary<string, object>>();
+        string f = Path.Combine(dir, "notes.jsonl");
+        if (!File.Exists(f)) return r;
+        foreach (string l in File.ReadAllLines(f))
+        {
+            if (l.Trim().Length == 0) continue;
+            Dictionary<string, object> d = Json.Parse(l) as Dictionary<string, object>;
+            if (d != null) r.Add(d);
+        }
+        return r;
+    }
+
+    // The checkpoint (rNNN) SAP2000 holds when it is in this session, else null.
+    string HeldCheckpoint(string dir)
+    {
+        try
+        {
+            string model = ctx.Sap.Read("session", delegate(SapRead r) { return r.ModelPath(); });
+            if (!string.Equals(SapDriver.SessionDirOf(model), dir, StringComparison.OrdinalIgnoreCase)) return null;
+            string n = Path.GetFileNameWithoutExtension(model);
+            return System.Text.RegularExpressions.Regex.IsMatch(n, @"^r\d+$") ? n : null;
+        }
+        catch (ToolError) { return null; }
     }
 
     static string Tail(string s, int n) { s = (s ?? "").Trim(); return s.Length <= n ? s : "..." + s.Substring(s.Length - n); }
