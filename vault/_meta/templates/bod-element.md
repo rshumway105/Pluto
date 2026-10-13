@@ -3,6 +3,7 @@ title: "<element>"
 type: bod-element
 status: draft
 created: <yyyy-mm-dd>
+group: "<SAP2000 group>"
 ---
 
 # <element>
@@ -19,6 +20,17 @@ What the element is, where it is, and what it does.
 - Codes and editions:
 - Limit states and acceptance criteria (stress, deflection, drift):
 - Category / importance factors:
+
+### Checks
+
+What `check_elements` reports for this element: the governing result over the group (and its ratio to the limit,
+when one is given). Kind: joint, reaction, frame, area, area_stress, link, or design (SAP2000 steel design ratio).
+Cases: blank for all, or names / wildcards separated by commas. Limit in the model's units. Needs the `group`
+property (the SAP2000 group holding the element's objects).
+
+| Quantity | Kind | Cases | Limit | Basis |
+|---|---|---|---|---|
+|  |  |  |  |  |
 
 ## Loads
 

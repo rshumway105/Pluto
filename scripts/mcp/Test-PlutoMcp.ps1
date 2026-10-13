@@ -311,6 +311,22 @@ try {
             if (-not $bok) { Write-Output $btx }
             Check "draft_bod_element: group objects and supports, patterns (r004: reverted before C1), the element's note, its record" $bok
             $null = Tool "draft_bod_element" @{ element = "BEAM-A"; notes_dir = $nd } -ExpectError
+            # governing checks from the element note; r004 = r001 with joint 1 fixed: a propped cantilever, PT 20 kip at
+            # midspan (LIVE 10 kip is smaller). With shear flexibility (2 ft deep, As = 5/6 A): roller reaction
+            # R = (5PL^3/48EI + PL/2GAs) / (L^3/3EI + L/GAs), fixed-end |M3| = PL/2 - RL (74.42; 3PL/16 = 75 without shear)
+            $hEI = 4176000.0 * 2 / 3; $hGAs = 4176000.0 / 2.6 * 2 * 5 / 6; $hL = 20.0; $hP = 20.0
+            $hRb = (5 * $hP * [Math]::Pow($hL, 3) / (48 * $hEI) + $hP * $hL / (2 * $hGAs)) / ([Math]::Pow($hL, 3) / (3 * $hEI) + $hL / $hGAs)
+            $Mhand = $hP * $hL / 2 - $hRb * $hL
+            Check "draft_bod_element: a Checks table with frame rows and the steel design ratio" ($btx.Contains("| M3 | frame |") -and $btx.Contains("| steel design ratio | design |  | 1.0 |"))
+            [IO.File]::WriteAllText($be.file, $btx.Replace("| M3 | frame |  |  |  |", "| M3 | frame |  | 150 | test limit |"))
+            $null = Tool "run_analysis" @{} 900
+            $ce = Tool "check_elements" @{ notes_dir = $nd; run_steel_design = $true } 900
+            $m3 = $ce.rows | Where-Object check -eq "M3"; $sd = $ce.rows | Where-Object kind -eq "design"
+            Check ("check_elements: M3 governing " + $m3.value + " (hand " + $Mhand + ")" + " in " + $m3.case + ", ratio " + $m3.ratio) ($m3 -and [Math]::Abs([Math]::Abs($m3.value) - $Mhand) -lt 1e-6 * $Mhand -and $m3.case -eq "PT" -and [Math]::Abs($m3.ratio - $Mhand / 150) -lt 1e-6 -and $ce.saved -like "*checks-r004.json")
+            Check ("check_elements: steel design " + $(if ($sd.value) { "ratio " + $sd.value + " (" + $sd.ratioType + ", " + $sd.case + ")" } else { $sd.note })) ($sd -and ($sd.value -gt 0 -or $sd.note))
+            $dr3 = Tool "write_design_record" @{ notes_dir = $nd }
+            $txt3 = [IO.File]::ReadAllText($dr3.file)
+            Check "write_design_record: the run of r004 shows the governing checks" ($txt3.Contains("**Governing checks**") -and $txt3.Contains("| BEAM-A | M3 (frame) |") -and $txt3.Contains("| 150 | " + ($Mhand / 150).ToString("0.######", [Globalization.CultureInfo]::InvariantCulture) + " |"))
         } finally { Remove-Item -Recurse -Force $nd -ErrorAction SilentlyContinue }
     }
     if ($Tables) {

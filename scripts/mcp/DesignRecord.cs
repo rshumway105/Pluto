@@ -143,6 +143,85 @@ public static class DesignRecord
         return r;
     }
 
+    // ---------------------------------------------------------------- element checks (check_elements)
+
+    public sealed class ElementCheck
+    {
+        public string Element, Group, Quantity, Kind, Limit, Basis;
+        public string[] Cases;
+        public double? LimitValue;
+        public bool Design;
+    }
+
+    // The checks an element note asks for: the table under a "Checks" heading (columns Quantity, Kind, Cases, Limit,
+    // Basis; an optional Group column overrides the note's `group` property). Kind "design" is SAP2000's steel design
+    // ratio over the group's frames (limit 1 unless given).
+    public static List<ElementCheck> ReadChecks(string file)
+    {
+        string text = File.ReadAllText(file);
+        Dictionary<string, object> props = Properties(text);
+        string element = PropStr(props, "title") ?? Path.GetFileNameWithoutExtension(file), group = PropStr(props, "group");
+        List<ElementCheck> r = new List<ElementCheck>();
+        string[] lines = text.Replace("\r\n", "\n").Split('\n');
+        int i = 0;
+        while (i < lines.Length && !Regex.IsMatch(lines[i], @"^#{2,4}\s*Checks\s*$", RegexOptions.IgnoreCase)) i++;
+        List<string> cols = null;
+        for (i++; i < lines.Length && !lines[i].StartsWith("#", StringComparison.Ordinal); i++)
+        {
+            string l = lines[i].Trim();
+            if (!l.StartsWith("|", StringComparison.Ordinal)) { if (cols != null) break; continue; }
+            List<string> cells = Cells(l);
+            if (cols == null) { cols = cells.ConvertAll(delegate(string h) { return h.ToLowerInvariant(); }); continue; }
+            if (cells.TrueForAll(delegate(string s) { return Regex.IsMatch(s, @"^:?-*:?$"); })) continue;   // the separator row
+            Func<string, string> at = delegate(string name) { int k = cols.IndexOf(name); return k >= 0 && k < cells.Count ? cells[k] : ""; };
+            ElementCheck c = new ElementCheck();
+            c.Element = element; c.Quantity = at("quantity"); c.Kind = at("kind").ToLowerInvariant(); c.Limit = at("limit"); c.Basis = at("basis");
+            c.Group = at("group").Length > 0 ? at("group") : group;
+            if (c.Quantity.Length == 0 && c.Kind.Length == 0) continue;
+            c.Design = c.Kind == "design" || c.Kind == "steel design";
+            string cs = at("cases");
+            c.Cases = cs.Length == 0 ? null : Array.ConvertAll(cs.Split(','), delegate(string s) { return s.Trim(); });
+            Match m = Regex.Match(c.Limit.Replace(",", ""), @"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?");
+            if (m.Success) c.LimitValue = double.Parse(m.Value, NumberStyles.Float, Inv);
+            else if (c.Design) c.LimitValue = 1;
+            r.Add(c);
+        }
+        return r;
+    }
+
+    static List<string> Cells(string row)
+    {
+        string s = row.Trim();
+        if (s.StartsWith("|", StringComparison.Ordinal)) s = s.Substring(1);
+        if (s.EndsWith("|", StringComparison.Ordinal) && !s.EndsWith("\\|", StringComparison.Ordinal)) s = s.Substring(0, s.Length - 1);
+        List<string> r = new List<string>();
+        foreach (string c in Regex.Split(s, @"(?<!\\)\|")) r.Add(c.Replace("\\|", "|").Trim());
+        return r;
+    }
+
+    // The governing checks saved by check_elements for one run checkpoint (checks-rNNN.json), as a table.
+    static void Checks(StringBuilder md, string file, string cp, List<string> open)
+    {
+        Dictionary<string, object> f = ReadJson(file);
+        List<Dictionary<string, object>> rows = Rows(f, "rows");
+        if (rows.Count == 0) return;
+        md.Append("\n**Governing checks** (check_elements, ").Append(When(Json.Str(f, "utc"))).Append(" UTC, units ").Append(Json.Str(f, "units")).Append(")\n\n")
+          .Append("| Element | Check | Governing | Value | Case | Limit | Ratio |\n|---|---|---|---|---|---|---|\n");
+        foreach (Dictionary<string, object> r in rows)
+        {
+            string check = Json.Str(r, "check") + (Json.Str(r, "kind") != null && Json.Str(r, "kind") != "design" ? " (" + Json.Str(r, "kind") + ")" : "");
+            string gov = Json.Str(r, "object") == null ? "_" + (Json.Str(r, "note") ?? "no result") + "_" :
+                Json.Str(r, "object") + (string.IsNullOrEmpty(Json.Str(r, "at")) ? "" : " at " + N(r["at"]));
+            string ratio = r.ContainsKey("ratio") && r["ratio"] != null ? N(r["ratio"]) : "";
+            bool over = r.ContainsKey("ratio") && r["ratio"] != null && Num(r, "ratio") > 1;
+            md.Append("| ").Append(Cell(Json.Str(r, "element"))).Append(" | ").Append(Cell(check)).Append(" | ").Append(Cell(gov)).Append(" | ")
+              .Append(r.ContainsKey("value") ? N(r["value"]) : "").Append(" | ").Append(Cell(Json.Str(r, "case") ?? "")).Append(" | ")
+              .Append(Cell(Json.Str(r, "limit") ?? "")).Append(" | ").Append(over ? "**" + ratio + "**" : ratio).Append(" |\n");
+            if (over) open.Add(cp + ": " + Json.Str(r, "element") + " " + Json.Str(r, "check") + " ratio " + ratio + " exceeds 1.");
+            else if (Json.Str(r, "object") == null) open.Add(cp + ": " + Json.Str(r, "element") + " " + Json.Str(r, "check") + ": " + (Json.Str(r, "note") ?? "no result") + ".");
+        }
+    }
+
     // ---------------------------------------------------------------- BOD element note (draft)
 
     // A first draft of a basis-of-design element note, <notes dir>\Elements\<element>.md, in the shape of
@@ -199,6 +278,12 @@ public static class DesignRecord
         }
 
         md.Append("## Design criteria\n\n- Codes and editions:\n- Limit states and acceptance criteria (stress, deflection, drift):\n- Category / importance factors:\n\n");
+        md.Append("### Checks\n\nWhat `check_elements` reports for this element: the governing result over the group (and its ratio to the limit,\n")
+          .Append("when one is given). Kind: joint, reaction, frame, area, area_stress, link, or design (SAP2000 steel design ratio).\n")
+          .Append("Cases: blank for all, or names / wildcards separated by commas. Limit in the model's units.\n\n")
+          .Append("| Quantity | Kind | Cases | Limit | Basis |\n|---|---|---|---|---|\n");
+        foreach (string[] row in SuggestedChecks(group, basis)) md.Append("| ").Append(string.Join(" | ", row)).Append(" |\n");
+        md.Append('\n');
 
         md.Append("## Loads\n\n");
         List<Dictionary<string, object>> pats = Rows(basis, "loadPatterns");
@@ -265,6 +350,37 @@ public static class DesignRecord
             "loadPatterns", pats.Count, "combos", combos.Count, "notes", mine.Count, "record", recordExists ? record : null,
             "note", "a draft: the engineer completes it by hand (criteria, load values and basis, governing checks); Pluto never overwrites it." +
                 (recordExists || record == null ? "" : " write_design_record with elements [\"" + element + "\"] links this session's record to it."));
+    }
+
+    // Checks to start from, by what the group holds: shells -> von Mises stress top / bottom; frames -> P, V2, M3 (and the
+    // steel design ratio when a frame section is steel); joints only -> displacement. Limits and basis left blank.
+    static List<string[]> SuggestedChecks(Dictionary<string, object> group, Dictionary<string, object> basis)
+    {
+        List<string[]> r = new List<string[]>();
+        Dictionary<string, object> objs = group == null ? null : Json.Obj(group, "objects");
+        Func<string, Dictionary<string, object>> kind = delegate(string k) { Dictionary<string, object> d = Json.Obj(objs, k); return d != null && Num(d, "count") > 0 ? d : null; };
+        if (objs != null && kind("area") != null)
+        {
+            r.Add(new[] { "SVMTop", "area_stress", "", "", "" });
+            r.Add(new[] { "SVMBot", "area_stress", "", "", "" });
+        }
+        Dictionary<string, object> frames = objs == null ? null : kind("frame");
+        if (frames != null)
+        {
+            r.Add(new[] { "P", "frame", "", "", "" });
+            r.Add(new[] { "V2", "frame", "", "", "" });
+            r.Add(new[] { "M3", "frame", "", "", "" });
+            Dictionary<string, object> used = Json.Obj(frames, "byProperty");
+            HashSet<string> steel = new HashSet<string>();
+            foreach (Dictionary<string, object> m in Rows(basis, "materials")) if (Json.Str(m, "type") == "Steel") steel.Add(Json.Str(m, "name"));
+            bool anySteel = false;
+            foreach (Dictionary<string, object> s in Rows(basis, "frameSections"))
+                if (used != null && used.ContainsKey(Json.Str(s, "name") ?? "") && steel.Contains(Json.Str(s, "material") ?? "")) anySteel = true;
+            if (anySteel) r.Add(new[] { "steel design ratio", "design", "", "1.0", "" });
+        }
+        if (objs != null && r.Count == 0 && kind("joint") != null) r.Add(new[] { "U", "joint", "", "", "" });
+        if (r.Count == 0) r.Add(new[] { "", "", "", "", "" });
+        return r;
     }
 
     static string Xyz(object v)
@@ -528,6 +644,8 @@ public static class DesignRecord
                         open.Add(cp + ": " + Json.Str(c, "case") + " equilibrium " + check + ".");
                 }
             }
+            string cf = Path.Combine(dir, "checks-" + cp + ".json");
+            if (File.Exists(cf)) Checks(md, cf, cp, open);
             md.Append('\n');
         }
     }

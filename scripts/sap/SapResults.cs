@@ -29,6 +29,7 @@ public class SapResults
     readonly SapRead read;
 
     public SapResults(SapSession session, SapRead reader) { s = session; read = reader; }
+    public string Units() { return s.Units(); }
     cSapModel M { get { return s.Model; } }
 
     // Quantities of a result kind, in the order Fetch fills Row.V. U = |(U1, U2, U3)|.
@@ -261,6 +262,64 @@ public class SapResults
             }
         }
         return rows;
+    }
+
+    // ---------------------------------------------------------------- governing results and design ratios (check_elements)
+
+    // The governing (largest magnitude) result of one quantity over a group's objects: object, value, case, step,
+    // location. cases: names / patterns (null: every finished case and combination, modal / buckling left out).
+    public Dictionary<string, object> Governing(string group, string kind, string quantity, IList<string> cases)
+    {
+        if (!read.GroupExists(group)) throw new ArgumentException("no group '" + group + "'");
+        ResultQuery q = new ResultQuery();
+        q.Kind = kind; q.Quantity = quantity; q.Cases = cases; q.Top = 1;
+        q.Only = new HashSet<string>(read.GroupMembers(group, ObjectKind(kind)));
+        if (q.Only.Count == 0) return O("group", group, "note", "group " + group + " has no " + ObjectKind(kind) + "s");
+        Dictionary<string, object> r = Query(q);
+        object top;
+        if (!r.TryGetValue("top", out top) || ((List<object>)top).Count == 0)
+            return O("group", group, "note", r.ContainsKey("note") ? r["note"] : "no results");
+        Dictionary<string, object> g = (Dictionary<string, object>)((List<object>)top)[0];
+        g.Remove("all");
+        g["quantity"] = r["quantity"]; g["units"] = r["units"]; g["objects"] = r["objects"];
+        return g;
+    }
+
+    static readonly string[] RatioTypes = { "?", "P-M-M", "major shear", "minor shear", "major beam-column capacity", "minor beam-column capacity", "other" };
+
+    // SAP2000 steel frame design ratios over a group's frames: the governing frame (largest ratio) with its ratio type,
+    // location and combination, how many exceed 1, and the design errors / warnings. run: start the design first (the
+    // model must have been run; auto-select sections may change).
+    public Dictionary<string, object> SteelDesign(string group, bool run)
+    {
+        if (!read.GroupExists(group)) throw new ArgumentException("no group '" + group + "'");
+        string code = "";
+        M.DesignSteel.GetCode(ref code);
+        if (run)
+        {
+            if (!M.GetModelIsLocked()) throw new ArgumentException("steel design needs analysis results: run_analysis first");
+            int rc = M.DesignSteel.StartDesign();
+            if (rc != 0) throw new ArgumentException("SAP2000 steel design did not run (StartDesign returned " + rc + ")");
+        }
+        if (!M.DesignSteel.GetResultsAvailable())
+            return O("available", false, "code", code, "note", "no steel design results: run the steel design in SAP2000, or check_elements run_steel_design");
+        int n = 0; string[] fr = null, combo = null, err = null, warn = null; double[] ratio = null, loc = null; int[] rt = null;
+        int ret = M.DesignSteel.GetSummaryResults(group, ref n, ref fr, ref ratio, ref rt, ref loc, ref combo, ref err, ref warn, eItemType.Group);
+        if (ret != 0 || n == 0) return O("available", true, "code", code, "frames", 0, "note", "no steel design results for the frames of " + group + " (not steel, or not designed)");
+        int g = 0, over = 0, errors = 0, warnings = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (ratio[i] > ratio[g]) g = i;
+            if (ratio[i] > 1) over++;
+            if (!string.IsNullOrEmpty(err[i])) errors++;
+            if (!string.IsNullOrEmpty(warn[i])) warnings++;
+        }
+        Dictionary<string, object> r = O("available", true, "code", code, "frames", n, "object", fr[g], "value", ratio[g],
+            "ratioType", rt[g] >= 0 && rt[g] < RatioTypes.Length ? RatioTypes[rt[g]] : rt[g].ToString(Inv), "at", loc[g], "case", combo[g],
+            "over1", over, "errors", errors, "warnings", warnings);
+        if (!string.IsNullOrEmpty(err[g])) r["error"] = err[g];
+        if (!string.IsNullOrEmpty(warn[g])) r["warning"] = warn[g];
+        return r;
     }
 
     // ---------------------------------------------------------------- query

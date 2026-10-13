@@ -580,6 +580,18 @@ public sealed class ToolSet
                 "session_dir", Prop("string", "Session whose notes and record to use (default: the current model's, when it is one).")),
             DraftBodElement);
 
+        Add("check_elements", "Governing results and utilisation per design element, as the BOD element notes ask: each note in " +
+            "<notes dir>\\Elements (its group property and its Checks table: quantity, kind, cases, limit, basis) gives, per check, " +
+            "the governing object, value, case and location over the group, and the ratio |value| / limit when a limit is given. " +
+            "Kind design: SAP2000's steel design ratio over the group's frames (ratio type, combination, how many exceed 1), read " +
+            "from existing design results. Saved with the run (checks-rNNN.json in the session) for the design record. Read only, " +
+            "unless run_steel_design.",
+            Schema("elements", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Element note names (default: every element note with checks)."),
+                "run_steel_design", Prop("boolean", "Run SAP2000's steel design first (the model must have been run; auto-select sections may " +
+                    "change; only when the user asks). Default false: read the design results there are."),
+                "notes_dir", Prop("string", "The Obsidian vault folder (default PLUTO_NOTES_DIR).")),
+            CheckElements);
+
         // Every edit (the tools with dry_run) takes an optional reason, kept in changes.jsonl for the design record.
         foreach (Tool t in tools)
         {
@@ -1789,6 +1801,65 @@ public sealed class ToolSet
         else dir = SapDriver.SessionDirOf(read[2]);
         return DesignRecord.DraftElement(element, notesDir, Json.Parse(read[0]) as Dictionary<string, object>,
             read[1] == null ? null : Json.Parse(read[1]) as Dictionary<string, object>, dir);
+    }
+
+    object CheckElements(Dictionary<string, object> a)
+    {
+        string notesDir = Json.Str(a, "notes_dir") ?? Environment.GetEnvironmentVariable("PLUTO_NOTES_DIR");
+        if (string.IsNullOrEmpty(notesDir)) throw new ToolError("no notes dir: pass notes_dir or set PLUTO_NOTES_DIR (the Obsidian vault folder)");
+        string edir = Path.Combine(notesDir, "Elements");
+        if (!Directory.Exists(edir)) throw new ToolError("no Elements folder in " + notesDir + ": draft_bod_element first");
+        string[] want = Json.Strs(a, "elements");
+        List<DesignRecord.ElementCheck> checks = new List<DesignRecord.ElementCheck>();
+        List<string> without = new List<string>(), found = new List<string>();
+        foreach (string f in Directory.GetFiles(edir, "*.md"))
+        {
+            string name = Path.GetFileNameWithoutExtension(f);
+            if (want != null && Array.IndexOf(want, name) < 0) continue;
+            found.Add(name);
+            List<DesignRecord.ElementCheck> c = DesignRecord.ReadChecks(f);
+            if (c.Count == 0) without.Add(name); else checks.AddRange(c);
+        }
+        if (want != null) foreach (string w in want) if (!found.Contains(w)) throw new ToolError("no element note " + Path.Combine(edir, w + ".md"));
+        if (checks.Count == 0) throw new ToolError("no checks: add a Checks table (quantity, kind, cases, limit, basis) to the element notes; draft_bod_element writes one");
+        bool runDesign = Json.Bool(a, "run_steel_design", false);
+
+        object[] got = ctx.Sap.Results("check_elements", delegate(SapRead r, SapResults res)
+        {
+            List<object> rows = new List<object>();
+            bool designed = false;
+            foreach (DesignRecord.ElementCheck c in checks)
+            {
+                Dictionary<string, object> row = Json.O("element", c.Element, "group", c.Group,
+                    "check", c.Design ? (c.Quantity.Length > 0 ? c.Quantity : "steel design ratio") : c.Quantity, "kind", c.Design ? "design" : c.Kind,
+                    "cases", c.Cases, "limit", c.Limit.Length > 0 ? c.Limit : c.Design ? "1.0" : null, "basis", c.Basis.Length > 0 ? c.Basis : null);
+                rows.Add(row);
+                if (c.Group == null) { row["note"] = "the element note has no group property"; continue; }
+                try
+                {
+                    Dictionary<string, object> g = c.Design ? res.SteelDesign(c.Group, runDesign && !designed) : res.Governing(c.Group, c.Kind, c.Quantity, c.Cases);
+                    if (c.Design && runDesign) designed = true;
+                    foreach (KeyValuePair<string, object> kv in g) if (kv.Key != "group" && kv.Key != "quantity") row[kv.Key] = kv.Value;
+                    if (g.ContainsKey("value") && c.LimitValue.HasValue && c.LimitValue.Value != 0)
+                        row["ratio"] = Math.Abs(Convert.ToDouble(g["value"], Json.Inv)) / Math.Abs(c.LimitValue.Value);
+                }
+                catch (ArgumentException e) { row["note"] = e.Message; }
+            }
+            return new object[] { rows, r.ModelPath(), res.Units() };
+        });
+        List<object> list = (List<object>)got[0];
+        Dictionary<string, object> result = Json.O("checks", list.Count, "rows", list, "units", got[2]);
+        if (without.Count > 0) result["withoutChecks"] = without;
+        string dir = SapDriver.SessionDirOf((string)got[1]), held = dir == null ? null : HeldCheckpoint(dir);
+        if (held != null)
+        {
+            string file = Path.Combine(dir, "checks-" + held + ".json");
+            File.WriteAllText(file, Json.Write(Json.O("checkpoint", held, "utc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv), "units", got[2], "rows", list)));
+            result["saved"] = file;
+            result["note"] = "write_design_record shows these under the run of " + held + (Directory.Exists(Path.Combine(dir, "runs", held)) ? "" : " (not run yet: the record lists checks only under runs)");
+        }
+        else result["note"] = "SAP2000 holds a model outside a Pluto session: not saved for a design record";
+        return result;
     }
 
     static List<Dictionary<string, object>> NoteLines(string dir)

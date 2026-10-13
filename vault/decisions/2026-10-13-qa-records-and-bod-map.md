@@ -89,3 +89,18 @@ synced folder, Obsidian Sync or git) vs the personal Notes vault.
 >    conditions; the model and its record), never overwrites. Usage: [[vault/arms/pluto-mcp|pluto-mcp]].
 >
 > **Open:** where real records live for a team (shared vault); the user finds the record longer than needed — trim later.
+
+> [!info]- 6. Governing checks and utilisation (added 2026-10-13, server 0.14.0)
+> **The user's questions of results:** the governing result per design element, and utilisation as **SAP2000's own
+> design ratios**; the checks are defined in the **BOD element note**, so the basis of design and the checks agree.
+> - The element note carries `group` (the SAP2000 group) and a **Checks** table under Design criteria: quantity, kind,
+>   cases, limit, basis. `draft_bod_element` prefills it by what the group holds (shells: SVMTop / SVMBot; frames: P, V2,
+>   M3 and, when steel, the steel design ratio; joints only: U).
+> - `check_elements` gives per check the governing object, value, case and location over the group (the query_results
+>   code), `|value| / limit` when a limit is given, and for kind `design` SAP2000's steel design ratio (governing frame,
+>   ratio type, combination, count over 1, errors / warnings). It runs the steel design only with `run_steel_design`.
+> - Saved as `checks-rNNN.json`; the design record lists them under that run, a ratio over 1 or a missing result as an
+>   open item.
+> - Concrete frame design gives a ratio for columns only (beams give rebar areas): not read yet.
+> - Tested (`-Edit`): a propped cantilever's fixed-end M3 against the shear-flexible hand value (74.4195 kip-ft) and its
+>   ratio to a limit; the steel design runs and reports a P-M-M ratio (not hand-checked).
