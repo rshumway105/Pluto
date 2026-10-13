@@ -48,6 +48,7 @@ SAP2000 26.3, development machine.
 > | `PLUTO_WORK` | work dir (default `%LOCALAPPDATA%\Pluto\work`) |
 > | `PLUTO_SAP_DIR` | SAP2000 install to build against and start (default the newest `SAP2000 NN`) |
 > | `PLUTO_SAP_INSTANCE=new` | start an own SAP2000 (closed on exit) instead of attaching to the user's |
+> | `PLUTO_NOTES_DIR` | Obsidian vault folder `write_design_record` writes into (`Records\`); no default |
 > | `PLUTO_VIEWER_PORT` | viewer host port (default 8765, next free if taken) |
 
 > [!info]- Tools (capability table)
