@@ -13,7 +13,7 @@ checkpoints, run it, query results at full precision, round-trip input tables th
 the Pluto viewer live. It is a C# 5 exe built on the one SAP controller
 ([[vault/arms/sap-controller|sap-controller]]); it adds argument checks, paging, files, checkpoints
 and the change log, never a second driver. The plan, decisions and per-phase test records are in
-[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.8.0,
+[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.9.0,
 SAP2000 26.3, development machine.
 
 ```text
@@ -60,6 +60,7 @@ SAP2000 26.3, development machine.
 > | start | `status`, `self_test` | server and program state, capabilities; install check in a second SAP2000 | `SapDriver`, `SapSession.WriteTestBeamS2k` |
 > | open | `open_model` | `.sdb` or `.s2k` / `.$2k` → saved at once as the session's `r000.sdb`; SAP2000 then holds the copy. Replaces what SAP2000 holds | `SapDriver.OpenModel` |
 > | read | `describe_model`, `list_objects`, `get_object`, `get_sections`, `get_materials`, `get_load_cases`, `get_combos` | overview, paged objects, one object in full, definitions with use counts | `SapRead` |
+> | basis | `describe_basis` | what the model rests on: overview + active DOFs, mass sources, frame releases, materials and combinations in full, each case's definition (static loads, P-delta, modal modes, response spectrum and modal time history loads, functions, combination rules, damping, steps) | `SapRead.Basis` |
 > | select | `select_objects`, `describe_levels` | objects by Z range, box, plane, section, group, name (combined); `save_as` a selection, `show_in_sap`; floor elevations from Z clusters, grid lines and level-named groups | `SapRead` |
 > | tables | `read_table` | any `DatabaseTables` input table, filtered, paged (display-rounded: input only) | `SapSession.TableRows` |
 > | run | `run_analysis` | new checkpoint, run, case status, log warnings, equilibrium, largest values; saves envelopes | `SapResults`, `SapDriver.RunAnalysis` |

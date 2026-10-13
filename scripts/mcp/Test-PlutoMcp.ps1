@@ -258,6 +258,9 @@ try {
         Check "set_frame_release frame 1: I end M3" ($e -and $e.changed -eq 1 -and $e.changes[0].after -like "I M3*")
         $e = Tool "set_group" @{ group = "MID"; kind = "joint"; add = @("2") }
         Check "set_group: MID created with joint 2" ($e -and $e.created -eq "MID")
+        $b = Tool "describe_basis" @{}
+        Check "describe_basis: frame 1 released I M3" ($b -and $b.releases.releasedFrames -eq 1 -and $b.releases.byRelease."I M3, J -" -eq 1)
+        Check "describe_basis: C1 = LIVE + 2 PT, PT case loads, a mass source" ((@(($b.combos | Where-Object name -eq "C1").items) | Where-Object { $_.name -eq "PT" -and $_.scale -eq 2 }) -and @(($b.loadCases | Where-Object name -eq "PT").loads).Count -ge 1 -and @($b.analysis.massSources).Count -ge 1 -and $b.analysis.activeDof)
         $rv = Tool "revert" @{ checkpoint = "r001" }
         Check "revert r001: its results are there" ($rv -and ($rv.casesWithResults -contains "PT"))
         $q = Tool "query_results" @{ kind = "frame"; quantity = "M3"; cases = @("PT"); top_n = 1 }

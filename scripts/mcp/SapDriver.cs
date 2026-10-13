@@ -41,6 +41,7 @@ public sealed class SapDriver : IModelDriver
             "self_test", true,
             "open_model", true,
             "describe_model", true,
+            "describe_basis", true,
             "list_objects", true,
             "get_object", true,
             "get_sections", true,

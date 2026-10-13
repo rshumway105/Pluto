@@ -478,6 +478,103 @@ public class SapRead
         return rows;
     }
 
+    // ---------------------------------------------------------------- basis (design record)
+
+    static readonly string[] NlGeom = { "none", "P-delta", "P-delta + large displacements" };
+    static readonly string[] ModalCombs = { "?", "CQC", "SRSS", "Absolute", "GMC", "NRC 10 percent", "Double sum" };
+    static readonly string[] DirCombs = { "?", "SRSS", "Absolute", "Scaled absolute" };
+
+    // What the model rests on, read from it for a design record: describe_model plus the analysis settings (active
+    // DOFs, mass sources), frame releases, materials in full, combinations in full and each load case's definition
+    // (static loads and initial case, nonlinear geometry, modal modes, response spectrum and modal time history loads
+    // with their functions, modal case, combination rules, damping, steps).
+    public Dictionary<string, object> Basis(int cap)
+    {
+        Dictionary<string, object> r = Describe(cap);
+        Index x = Objects();
+        bool[] dof = new bool[6];
+        M.Analyze.GetActiveDOF(ref dof);
+        string def = "";
+        M.SourceMass.GetDefault(ref def);
+        List<object> masses = new List<object>();
+        foreach (string m in NameList(M.SourceMass.GetNameList))
+        {
+            bool el = false, ms = false, ld = false, isDef = false; int n = 0; string[] pat = null; double[] sf = null;
+            if (M.SourceMass.GetMassSource(m, ref el, ref ms, ref ld, ref isDef, ref n, ref pat, ref sf) != 0) continue;
+            List<object> loads = new List<object>();
+            for (int k = 0; k < n; k++) loads.Add(O("pattern", pat[k], "scale", sf[k]));
+            masses.Add(O("name", m, "default", m == def, "fromElements", el, "fromAddedMasses", ms, "fromLoads", ld, "loads", loads));
+        }
+        r["analysis"] = O("activeDof", Flags(dof, GlobalDof), "massSources", masses);
+
+        Dictionary<string, int> byRelease = new Dictionary<string, int>();
+        int partial = 0;
+        foreach (string f in x.Frames)
+        {
+            bool[] ii = null, jj = null; double[] si = null, sj = null;
+            if (M.FrameObj.GetReleases(f, ref ii, ref jj, ref si, ref sj) != 0) continue;
+            string k = "I " + Flags(ii, ReleaseDof) + ", J " + Flags(jj, ReleaseDof);
+            if (k != "I -, J -") Bump(byRelease, k);
+            foreach (double[] v in new[] { si, sj }) if (v != null && Array.Exists(v, delegate(double z) { return z != 0; })) { partial++; break; }
+        }
+        r["releases"] = O("releasedFrames", Sum(byRelease), "byRelease", byRelease, "partialFixity", partial);
+
+        r["materials"] = Cap(r, "materials", MaterialRows(null, true), cap);
+        r["combos"] = Cap(r, "combos", ComboRows(null, true), cap);
+        List<Dictionary<string, object>> cases = CaseRows(null, true);
+        foreach (Dictionary<string, object> c in cases) CaseSettings(c);
+        r["loadCases"] = Cap(r, "loadCases", cases, cap);
+        r.Remove("indexSeconds");
+        return r;
+    }
+
+    // Adds the definition of a case beyond its loads (see Basis); a type not read keeps CaseRows' note.
+    void CaseSettings(Dictionary<string, object> c)
+    {
+        string name = (string)c["name"], type = (string)c["type"];
+        int a = 0, b = 0, n = 0; double f = 0, g = 0, h = 0; string sv = "";
+        if (type == "NonlinearStatic")
+        {
+            if (M.LoadCases.StaticNonlinear.GetGeometricNonlinearity(name, ref a) == 0) c["geometricNonlinearity"] = a >= 0 && a < NlGeom.Length ? NlGeom[a] : a.ToString(Inv);
+            if (M.LoadCases.StaticNonlinear.GetMassSource(name, ref sv) == 0 && sv.Length > 0) c["massSource"] = sv;
+        }
+        else if (type == "Modal")
+        {
+            if (M.LoadCases.ModalEigen.GetNumberModes(name, ref a, ref b) == 0) c["modal"] = O("method", "eigen", "maxModes", a, "minModes", b);
+            else if (M.LoadCases.ModalRitz.GetNumberModes(name, ref a, ref b) == 0) c["modal"] = O("method", "ritz", "maxModes", a, "minModes", b);
+            if (c.ContainsKey("modal")) c.Remove("definition");
+        }
+        else if (type == "ResponseSpectrum")
+        {
+            string[] dir = null, fn = null, cs = null; double[] sf = null, ang = null;
+            if (M.LoadCases.ResponseSpectrum.GetLoads(name, ref n, ref dir, ref fn, ref sf, ref cs, ref ang) != 0) return;
+            List<object> loads = new List<object>();
+            for (int k = 0; k < n; k++) loads.Add(O("direction", dir[k], "function", fn[k], "scale", sf[k], "csys", cs[k], "angle", ang[k]));
+            c["loads"] = loads;
+            c.Remove("definition");
+            if (M.LoadCases.ResponseSpectrum.GetModalCase(name, ref sv) == 0) c["modalCase"] = sv;
+            if (M.LoadCases.ResponseSpectrum.GetModalComb_1(name, ref a, ref f, ref g, ref b, ref h) == 0) c["modalCombination"] = a >= 0 && a < ModalCombs.Length ? ModalCombs[a] : a.ToString(Inv);
+            if (M.LoadCases.ResponseSpectrum.GetDirComb(name, ref a, ref f) == 0) c["directionalCombination"] = a >= 0 && a < DirCombs.Length ? DirCombs[a] : a.ToString(Inv);
+            if (M.LoadCases.ResponseSpectrum.GetDampConstant(name, ref f) == 0) c["damping"] = f;
+            if (M.LoadCases.ResponseSpectrum.GetEccentricity(name, ref f) == 0) c["eccentricity"] = f;
+        }
+        else if (type == "LinearHistory")
+        {
+            if (M.LoadCases.ModHistLinear.GetModalCase(name, ref sv) != 0) return;   // direct integration: not read
+            string[] lt = null, ln = null, fn = null, cs = null; double[] sf = null, tf = null, at = null, ang = null;
+            if (M.LoadCases.ModHistLinear.GetLoads(name, ref n, ref lt, ref ln, ref fn, ref sf, ref tf, ref at, ref cs, ref ang) == 0)
+            {
+                List<object> loads = new List<object>();
+                for (int k = 0; k < n; k++) loads.Add(O("type", lt[k], "name", ln[k], "function", fn[k], "scale", sf[k], "timeFactor", tf[k], "arrivalTime", at[k]));
+                c["loads"] = loads;
+                c.Remove("definition");
+            }
+            c["method"] = "modal"; c["modalCase"] = sv;
+            if (M.LoadCases.ModHistLinear.GetTimeStep(name, ref a, ref f) == 0) { c["steps"] = a; c["stepSize"] = f; }
+            if (M.LoadCases.ModHistLinear.GetDampConstant(name, ref f) == 0) c["damping"] = f;
+        }
+    }
+
     // ---------------------------------------------------------------- objects
 
     // One page of objects of a kind (optionally only a group's / a given name list), with a short summary each.

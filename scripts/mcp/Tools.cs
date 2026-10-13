@@ -56,6 +56,19 @@ public sealed class ToolSet
             Schema("max_rows", Prop("integer", "Rows per list (default 200).")),
             Describe);
 
+        Add("describe_basis",
+            "What the model rests on, for a design record or a review: describe_model plus the analysis settings (active " +
+            "DOFs, mass sources), frame releases by pattern, materials in full (E, weight, Fy / fc), combinations with " +
+            "their items, and each load case's definition: static loads and initial case, nonlinear geometry (P-delta), " +
+            "modal modes, response spectrum and modal time history loads with functions, modal case, combination rules, " +
+            "damping and steps. Read only; values in the model's present units.",
+            Schema("max_rows", Prop("integer", "Rows per list (default 200).")),
+            delegate(Dictionary<string, object> a)
+            {
+                int cap = Limit(a, "max_rows");
+                return ctx.Sap.Read("describe_basis", delegate(SapRead r) { return r.Basis(cap); });
+            });
+
         Add("list_objects",
             "Pages through objects of one kind: joints (coordinates), frames (end joints, section, length), areas " +
             "(corner joints, section), links (end joints, property, length). Optionally only a group's members or a " +
