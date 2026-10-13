@@ -2109,9 +2109,12 @@ async function loadDemo() {
     var soft = await FEASample.buildSampleBlobV4(0);
     var stiff = await FEASample.buildSampleBlobV4(1);
     await loadModels([
-        { file: soft,  name: 'PlateDemo_Rev5_SoilSprings_Soft' },
-        { file: stiff, name: 'PlateDemo_Rev5_SoilSprings_Stiff' }
+        { file: soft,  name: 'SyntheticDemo_Soft' },
+        { file: stiff, name: 'SyntheticDemo_Stiff' }
     ]);
+    // say so: its made-up fields and the shell left blank on purpose (sampleModel.js) read like a model problem
+    log('Demo: a SYNTHETIC plate and frame with made-up result fields (one shell is left blank on purpose to show ' +
+        'missing data). Not an analysis. Open a .bin to see a real model.');
     if (feaModel && feaModel.unified && window.FEAFeatures) {
         FEAFeatures.setEnvelope(FEASample.buildSampleFeatures(feaModel.unified), 'PlateDemo.features.json');
     }

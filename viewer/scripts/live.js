@@ -6,7 +6,8 @@
 // viewer_* tools, { id, cmd, args }, and this answers { id, ok, result | error }; it reconnects when
 // the server restarts. Commands drive the viewer the way a user would (the dropdowns, Find, the groups
 // switch) through the globals of viewer.js, so live mode adds no second render path:
-//   load      { bin, features?, name }   the .bin is read through HTTP Range slices (never whole)
+//   load      { bin, features?, name, up? }   the .bin is read through HTTP Range slices (never whole);
+//                                         up 'z' | 'y' sets the world up axis first
 //   show      { component?, case?, beam_component?, deformed? }
 //   highlight { items: [group items], only }   painted through FEAFeatures (tag "pluto-live")
 //   unhighlight
@@ -69,6 +70,7 @@ var FEALive = (function () {
             case: selectedText(elLC),
             caption: text(elViewCaption),
             deformed: !!(elDefEnable && elDefEnable.checked),
+            up: zUp ? 'z' : 'y',
             pinned: !!pinned,
             readout: {
                 mode: text(elRoMode), value: text(elRoValue), component: text(elRoComp),
@@ -117,6 +119,7 @@ var FEALive = (function () {
         state: async function () { return state(); },
 
         load: async function (a) {
+            if (a.up === 'z' || a.up === 'y') setZUp(a.up === 'z');   // before loading, so the first fit uses it
             var f = await remoteFile(a.bin, a.name || 'model');
             await loadModels([{ file: f, name: a.name || 'model' }]);
             if (a.features && window.FEAFeatures) {

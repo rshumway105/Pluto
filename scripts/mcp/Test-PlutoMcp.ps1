@@ -187,6 +187,7 @@ try {
                     Check "viewer connects over the WebSocket" ($con -and $con.connected)
                     $vl = Tool "viewer_load" @{} 900
                     Check ("viewer_load: model with components (" + (@($vl.state.components) -join ", ") + ")") ($vl -and $vl.state.loaded -and @($vl.state.components).Count -gt 0 -and @($vl.state.cases).Count -gt 0)
+                    Check "viewer_load: a SAP2000 export sets Z up" ($vl.state.up -eq "z")
                     $comp = @($vl.state.components)[0]
                     $vs = Tool "viewer_show" @{ component = $comp; case = "HYDRO" }
                     Check "viewer_show: HYDRO, $comp" ($vs -and $vs.case -like "HYDRO*" -and $vs.component -eq $comp)

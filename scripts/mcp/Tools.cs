@@ -469,9 +469,12 @@ public sealed class ToolSet
             ViewerOpen);
 
         Add("viewer_load", "Loads a model into the live viewer: by default the latest export_viewer of the current checkpoint (export: " +
-            "true exports first, or when none exists). The .bin streams in slices (HTTP Range), so large files load too.",
+            "true exports first, or when none exists). The .bin streams in slices (HTTP Range), so large files load too. " +
+            "SAP2000 models are Z up: the viewer is set to Z up for them unless up says otherwise.",
             Schema("bin", Prop("string", "A .bin under the work dir (default: the current checkpoint's export)."),
-                "export", Prop("boolean", "Run export_viewer first (default: only when the checkpoint has no export).")),
+                "export", Prop("boolean", "Run export_viewer first (default: only when the checkpoint has no export)."),
+                "up", Enum("World up axis: z (SAP2000, ETABS; the default for the current checkpoint's export) or y (STAAD). " +
+                    "Default for a bin given by path: the viewer's current setting.", new[] { "z", "y" })),
             ViewerLoad);
 
         Add("viewer_show", "Chooses what the live viewer shows: the shell result component (e.g. 'SVM Top', as listed in the viewer's " +
@@ -1190,10 +1193,12 @@ public sealed class ToolSet
     {
         ViewerHost v = Viewer();
         if (!v.Connected) throw new ToolError("no viewer is connected: viewer_open first");
-        string bin = Json.Str(a, "bin");
+        string bin = Json.Str(a, "bin"), up = Json.Str(a, "up");
+        if (up != null && up != "z" && up != "y") throw new ToolError("up must be z or y");
         Dictionary<string, object> exported = null;
         if (bin == null)
         {
+            if (up == null) up = "z";   // the current checkpoint is a SAP2000 model
             string model = ctx.Sap.Read("viewer_load", delegate(SapRead r) { return r.ModelPath(); });
             string dir = SapDriver.SessionDirOf(model) ?? Path.Combine(ctx.WorkDir, "viewer");
             bin = Path.Combine(dir, "viewer", Safe(Path.GetFileNameWithoutExtension(model)) + ".bin");
@@ -1207,7 +1212,7 @@ public sealed class ToolSet
         string baseName = bin.Substring(0, bin.Length - 4), url = v.WorkUrl(bin);
         if (url == null) throw new ToolError("the viewer serves only files under the work dir " + ctx.WorkDir);
         string feat = File.Exists(baseName + ".features.json") ? v.WorkUrl(baseName + ".features.json") : null;
-        object state = v.Command("load", Json.O("bin", url, "features", feat, "name", Path.GetFileNameWithoutExtension(bin)), TimeSpan.FromMinutes(10));
+        object state = v.Command("load", Json.O("bin", url, "features", feat, "name", Path.GetFileNameWithoutExtension(bin), "up", up), TimeSpan.FromMinutes(10));
         v.LoadedBase = baseName;
         labels = null;
         Dictionary<string, object> res = Json.O("loaded", bin, "features", feat != null, "state", state);

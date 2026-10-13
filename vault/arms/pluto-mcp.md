@@ -13,7 +13,7 @@ checkpoints, run it, query results at full precision, round-trip input tables th
 the Pluto viewer live. It is a C# 5 exe built on the one SAP controller
 ([[vault/arms/sap-controller|sap-controller]]); it adds argument checks, paging, files, checkpoints
 and the change log, never a second driver. The plan, decisions and per-phase test records are in
-[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.12.0,
+[[vault/decisions/2026-10-12-llm-model-interface|2026-10-12-llm-model-interface]]. Server 0.13.0,
 SAP2000 26.3, development machine.
 
 ```text
@@ -158,7 +158,7 @@ SAP2000 26.3, development machine.
 >   peak tip displacement 2F/k, base shear 2F).
 > - Checked by the user in Claude Desktop (2026-10-12): the live viewer follows Claude's viewer tools, and a shell
 >   the user clicked (pinned readout) is read back through `viewer_get_selection`.
-> - The live viewer opens Y-up; SAP2000 models need **Z up** ticked by hand (not yet set by `viewer_load`).
+> - `viewer_load` sets the live viewer to **Z up** for SAP2000 exports (argument `up`: `z` / `y`; 0.13.0). Files opened by hand through the picker still follow the **Z up** box.
 > - Not yet tried: a multi-GB `.bin` over
 >   HTTP Range; a large model (index and export time, a `run_analysis` longer than the client's tool
 >   timeout); SAP2000 22 (the production machine).
