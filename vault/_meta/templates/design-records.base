@@ -1,0 +1,26 @@
+filters:
+  and:
+    - 'type == "design-record"'
+views:
+  - type: table
+    name: All design records
+    order:
+      - file.name
+      - title
+      - elements
+      - model
+      - program
+      - date
+      - author
+      - status
+  - type: table
+    name: Drafts
+    filters:
+      and:
+        - 'status == "draft"'
+    order:
+      - file.name
+      - title
+      - elements
+      - date
+      - author

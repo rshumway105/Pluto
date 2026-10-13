@@ -548,6 +548,20 @@ public sealed class ToolSet
                 "session_dir", Prop("string", "Another session's folder (default: the current model's).")),
             ListNotes);
 
+        Add("write_design_record", "Writes the session's design record: one Markdown note for Obsidian in <notes dir>\\Records\\<model>-<session>.md " +
+            "(notes dir: notes_dir, else PLUTO_NOTES_DIR). Sections: purpose, model basis (describe_basis of the checkpoint SAP2000 " +
+            "holds, else the last one saved), assumptions and conditions (log_note), decisions and the edits with their reasons, " +
+            "analysis and checks (case status, log warnings, equilibrium per run), tool verification (hand-check fixtures), open " +
+            "questions, session folder. Rewriting regenerates it but keeps text between pluto:notes markers and the properties " +
+            "edited by hand (status, author, elements). Does not change the model.",
+            Schema("title", Prop("string", "Note title (default: 'Design record <model> <session>'; kept from the note when omitted)."),
+                "purpose", Prop("string", "What the session set out to do: the Purpose section, written once (later edits in the note win)."),
+                "elements", Json.O("type", "array", "items", Json.O("type", "string"), "description", "Design elements (BOD element note names) the record supports; linked as [[name]]."),
+                "author", Prop("string", "Who did the work (kept from the note when omitted)."),
+                "notes_dir", Prop("string", "The Obsidian vault folder (default PLUTO_NOTES_DIR)."),
+                "session_dir", Prop("string", "Another session's folder (default: the current model's).")),
+            WriteDesignRecord);
+
         // Every edit (the tools with dry_run) takes an optional reason, kept in changes.jsonl for the design record.
         foreach (Tool t in tools)
         {
@@ -1702,6 +1716,37 @@ public sealed class ToolSet
             list.Add(n);
         }
         return Json.O("sessionDir", dir, "file", Path.Combine(dir, "notes.jsonl"), "total", notes.Count, "superseded", replacedBy.Count, "notes", list);
+    }
+
+    object WriteDesignRecord(Dictionary<string, object> a)
+    {
+        string notesDir = Json.Str(a, "notes_dir") ?? Environment.GetEnvironmentVariable("PLUTO_NOTES_DIR");
+        if (string.IsNullOrEmpty(notesDir)) throw new ToolError("no notes dir: pass notes_dir or set PLUTO_NOTES_DIR (the Obsidian vault folder for design records)");
+        string dir = SessionDirFor(a);
+        // the basis of the checkpoint SAP2000 holds (saved as basis-rNNN.json), else the newest one saved
+        Dictionary<string, object> basis = null;
+        string from = null, held = HeldCheckpoint(dir);
+        if (held != null)
+        {
+            string text = Json.Write(ctx.Sap.Read("describe_basis", delegate(SapRead r) { return r.Basis(SapRead.DefaultLimit); }));
+            File.WriteAllText(Path.Combine(dir, "basis-" + held + ".json"), text);
+            basis = Json.Parse(text) as Dictionary<string, object>;
+            from = held + ", read from SAP2000 now";
+        }
+        else
+        {
+            List<string> saved = new List<string>(Directory.GetFiles(dir, "basis-r*.json"));
+            saved.Sort(StringComparer.OrdinalIgnoreCase);
+            if (saved.Count > 0)
+            {
+                string f = saved[saved.Count - 1];
+                basis = Json.Parse(File.ReadAllText(f)) as Dictionary<string, object>;
+                from = Path.GetFileNameWithoutExtension(f).Substring(6) + ", saved " + File.GetLastWriteTimeUtc(f).ToString("yyyy-MM-dd HH:mm", Json.Inv) + " UTC";
+            }
+        }
+        DesignRecord.Args ra = new DesignRecord.Args();
+        ra.Title = Json.Str(a, "title"); ra.Purpose = Json.Str(a, "purpose"); ra.Author = Json.Str(a, "author"); ra.Elements = Json.Strs(a, "elements");
+        return DesignRecord.Write(dir, notesDir, basis, from, Path.Combine(ctx.WorkDir, "fixtures.json"), ra);
     }
 
     static List<Dictionary<string, object>> NoteLines(string dir)

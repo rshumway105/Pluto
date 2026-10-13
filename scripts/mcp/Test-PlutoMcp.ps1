@@ -285,6 +285,17 @@ try {
         Check "list_notes: superseded left out" ($ln -and $ln.total -eq 3 -and @($ln.notes).Count -eq 2 -and -not ($ln.notes | Where-Object id -eq "n002"))
         $ln = Tool "list_notes" @{ topic = "loads"; superseded = $true }
         Check "list_notes topic loads with superseded: n002 marked by n003" ($ln -and @($ln.notes).Count -eq 2 -and ($ln.notes | Where-Object id -eq "n002").supersededBy -eq "n003")
+        # the design record: written into a throwaway notes dir, hand text kept on a rewrite
+        $nd = Join-Path ([IO.Path]::GetTempPath()) ("pluto-notes-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+        try {
+            $dr = Tool "write_design_record" @{ notes_dir = $nd; purpose = "Beam edit test."; elements = @("BEAM-A") }
+            $txt = if ($dr -and (Test-Path $dr.file)) { [IO.File]::ReadAllText($dr.file) } else { "" }
+            Check "write_design_record: basis of r004, notes, edits with reasons, runs" ($dr -and $dr.basisFrom -like "r004*" -and $txt.Contains("[[BEAM-A]]") -and $txt -like "*Left support fixed*" -and $txt -like "*replaces question n002*" -and $txt -like "*bearing restrains torsion*" -and $txt -like "*### Run r002*")
+            [IO.File]::WriteAllText($dr.file, $txt.Replace("<!-- pluto:notes checks -->`r`n", "<!-- pluto:notes checks -->`r`nChecked by hand.`r`n").Replace('status: "draft"', 'status: "reviewed"'))
+            $dr2 = Tool "write_design_record" @{ notes_dir = $nd }
+            $txt2 = [IO.File]::ReadAllText($dr2.file)
+            Check "write_design_record again: hand text, status, purpose and elements kept" ($txt2 -like "*Checked by hand.*" -and $txt2 -like '*status: "reviewed"*' -and $txt2 -like "*Beam edit test.*" -and $txt2.Contains("[[BEAM-A]]"))
+        } finally { Remove-Item -Recurse -Force $nd -ErrorAction SilentlyContinue }
     }
     if ($Tables) {
         if (-not $beam) { throw "-Tables needs -SelfTest (it edits the self-test beam)" }

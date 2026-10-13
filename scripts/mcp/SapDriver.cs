@@ -62,7 +62,8 @@ public sealed class SapDriver : IModelDriver
             "edit_model", "targeted tools (sections, properties, materials, restraints, releases, loads, patterns, cases, combos, groups, joint moves, frames, deletes), each into a checkpoint, logged, with dry_run",
             "tables_in_excel", "export_tables -> Excel -> import_tables (dry run first; into a checkpoint, unlocked, one import, its log)",
             "revert", "reopens any checkpoint of the session; list_checkpoints, get_change_log",
-            "design_notes", "log_note / list_notes: assumptions, conditions, decisions, questions with their basis (notes.jsonl); every edit takes an optional reason");
+            "design_notes", "log_note / list_notes: assumptions, conditions, decisions, questions with their basis (notes.jsonl); every edit takes an optional reason",
+            "design_record", "write_design_record: the session as an Obsidian note (basis, assumptions, changes with reasons, checks, open questions) in PLUTO_NOTES_DIR\\Records");
     }
 
     // PLUTO_SAP_INSTANCE=new: the server starts a SAP2000 of its own and closes it on exit (tests that must not touch the

@@ -12,7 +12,7 @@ using System.Text;
 
 public static class PlutoMcp
 {
-    public const string ServerVersion = "0.9.0";
+    public const string ServerVersion = "0.10.0";
     const string DefaultProtocol = "2025-06-18";
 
     static TextWriter proto;

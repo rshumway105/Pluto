@@ -78,6 +78,9 @@ synced folder, Obsidian Sync or git) vs the personal Notes vault.
 > [!info]- 5. Build order
 > 1. ~~`reason` on edits + `log_note` / `list_notes`~~ — built 2026-10-13, server 0.8.0 (tested in `-Edit`).
 > 2. ~~Model basis extraction~~ — built 2026-10-13, server 0.9.0: `describe_basis` (`SapRead.Basis`), checked on the beam (`-Edit`) and on the one-mass cantilever's modal, RS and modal TH cases.
-> 3. `write_design_record` + templates (record, BOD element, Bases view).
+> 3. ~~`write_design_record` + templates~~ — built 2026-10-13, server 0.10.0: `DesignRecord.cs`; templates in
+>    `vault/_meta/templates/` (`bod-element.md`, `design-records.base`). Tested in `-Edit` (content, rewrite keeps hand
+>    text and properties) and on the one-mass cantilever into a sandbox vault. The `file.hasLink(this.file)` filter in
+>    the element template's embedded base is not yet checked in Obsidian.
 > 4. Fixtures into the repo + `fixtures.json`.
 > 5. Usage lines in [[vault/arms/pluto-mcp|pluto-mcp]]; this note → `current`.
