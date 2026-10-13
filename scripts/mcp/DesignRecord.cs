@@ -143,6 +143,139 @@ public static class DesignRecord
         return r;
     }
 
+    // ---------------------------------------------------------------- BOD element note (draft)
+
+    // A first draft of a basis-of-design element note, <notes dir>\Elements\<element>.md, in the shape of
+    // vault/_meta/templates/bod-element.md: the model's load patterns and combinations, the group's objects and supports,
+    // the assumptions and conditions logged for this element, the model and its design record. Never overwrites: once
+    // the note exists it is the engineer's. basis / group: JSON-parsed describe_basis / SapRead.GroupSummary (group may be null).
+    public static Dictionary<string, object> DraftElement(string element, string notesDir, Dictionary<string, object> basis,
+        Dictionary<string, object> group, string sessionDir)
+    {
+        notesDir = Path.GetFullPath(notesDir);
+        if (element.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || element.Contains("[") || element.Contains("]") || element.Contains("|") || element.Contains("#"))
+            throw new ToolError("element '" + element + "' cannot be a note name (no \\ / : * ? \" < > | [ ] #)");
+        string file = Path.Combine(notesDir, "Elements", element + ".md");
+        if (File.Exists(file)) throw new ToolError(file + " exists: an element note is written by hand once drafted, so Pluto does not overwrite it");
+        string model = basis == null ? null : Path.GetFileName(Json.Str(basis, "model"));
+        Dictionary<string, object> session = sessionDir == null ? null : ReadJson(Path.Combine(sessionDir, "session.json"));
+        string original = session == null ? model : Path.GetFileName(Json.Str(session, "original"));
+
+        StringBuilder md = new StringBuilder();
+        md.Append("---\n");
+        md.Append("title: ").Append(Yaml(element)).Append('\n');
+        md.Append("type: bod-element\n");
+        md.Append("status: draft\n");
+        md.Append("created: ").Append(DateTime.Now.ToString("yyyy-MM-dd", Inv)).Append('\n');
+        if (original != null) md.Append("model: ").Append(Yaml(original)).Append('\n');
+        if (group != null) md.Append("group: ").Append(Yaml(Json.Str(group, "group"))).Append('\n');
+        md.Append("---\n\n# ").Append(element).Append("\n\n");
+        md.Append("> [!info] Basis-of-design element note, drafted by Pluto's `draft_bod_element` from ").Append(original ?? "the model")
+          .Append(" on ").Append(DateTime.Now.ToString("yyyy-MM-dd", Inv)).Append(". Pluto does not edit it again: correct and complete it by\n")
+          .Append("> hand. The design records that support it link here through their `elements` property and are listed at the end.\n\n");
+
+        md.Append("## Description\n\nWhat the element is, where it is, and what it does.\n\n");
+        if (group != null)
+        {
+            md.Append("In the model it is group **").Append(Json.Str(group, "group")).Append("**:\n\n");
+            Dictionary<string, object> objs = Json.Obj(group, "objects");
+            if (objs != null)
+                foreach (KeyValuePair<string, object> kv in objs)
+                {
+                    Dictionary<string, object> d = kv.Value as Dictionary<string, object>;
+                    if (d == null || Num(d, "count") == 0) continue;
+                    md.Append("- ").Append(Json.Str(d, "count")).Append(' ').Append(kv.Key).Append('s');
+                    Dictionary<string, object> by = Json.Obj(d, "byProperty");
+                    if (by != null && by.Count > 0) md.Append(" (").Append(Counts(by)).Append(')');
+                    Dictionary<string, object> ext = Json.Obj(d, "extent");
+                    if (ext != null) md.Append(", from ").Append(Xyz(ext["min"])).Append(" to ").Append(Xyz(ext["max"]));
+                    md.Append('\n');
+                }
+            Dictionary<string, object> sup = Json.Obj(group, "supports");
+            if (sup != null && Num(sup, "restrainedJoints") > 0)
+                md.Append("- ").Append(Json.Str(sup, "restrainedJoints")).Append(" restrained joints (").Append(Counts(Json.Obj(sup, "byRestraint"))).Append(")\n");
+            if (basis != null) md.Append("\nCoordinates in ").Append(Json.Str(basis, "units")).Append(", global.\n");
+            md.Append('\n');
+        }
+
+        md.Append("## Design criteria\n\n- Codes and editions:\n- Limit states and acceptance criteria (stress, deflection, drift):\n- Category / importance factors:\n\n");
+
+        md.Append("## Loads\n\n");
+        List<Dictionary<string, object>> pats = Rows(basis, "loadPatterns");
+        if (pats.Count == 0) md.Append("| Load | Value | Basis |\n|---|---|---|\n|  |  |  |\n\n");
+        else
+        {
+            md.Append("Load patterns in the model (fill in the values and their basis):\n\n| Load pattern | Type | Value | Basis |\n|---|---|---|---|\n");
+            foreach (Dictionary<string, object> p in pats)
+                md.Append("| ").Append(Cell(Json.Str(p, "name"))).Append(" | ").Append(Json.Str(p, "type"))
+                  .Append(Num(p, "selfWeightMultiplier") != 0 ? ", self weight \u00d7 " + N(p["selfWeightMultiplier"]) : "").Append(" |  |  |\n");
+            md.Append('\n');
+        }
+        List<Dictionary<string, object>> combos = Rows(basis, "combos");
+        md.Append("Combinations used:");
+        if (combos.Count == 0) md.Append("\n\n");
+        else
+        {
+            md.Append("\n\n");
+            foreach (Dictionary<string, object> c in combos)
+            {
+                List<string> items = new List<string>();
+                foreach (Dictionary<string, object> i in Rows(c, "items")) items.Add(N(i["scale"]) + " " + Json.Str(i, "name"));
+                md.Append("- ").Append(Json.Str(c, "name")).Append(" (").Append(Json.Str(c, "type")).Append("): ").Append(string.Join(" + ", items.ToArray())).Append('\n');
+            }
+            md.Append('\n');
+        }
+
+        md.Append("## Conditions and assumptions\n\nWhat holds for this element whatever the model: supports, existing structure, site and supplied data, each with its\nbasis. Assumptions tied to one model are in that model's design records.\n\n");
+        List<Dictionary<string, object>> notes = sessionDir == null ? new List<Dictionary<string, object>>() : Lines(Path.Combine(sessionDir, "notes.jsonl"));
+        HashSet<string> replaced = new HashSet<string>();
+        foreach (Dictionary<string, object> n in notes) if (Json.Str(n, "supersedes") != null) replaced.Add(Json.Str(n, "supersedes"));
+        List<Dictionary<string, object>> mine = notes.FindAll(delegate(Dictionary<string, object> n)
+        {
+            string k = Json.Str(n, "kind");
+            string[] els = Json.Strs(n, "elements");
+            return (k == "assumption" || k == "condition") && !replaced.Contains(Json.Str(n, "id") ?? "") && els != null && Array.IndexOf(els, element) >= 0;
+        });
+        if (mine.Count > 0)
+        {
+            md.Append("Logged for this element in the Pluto session (keep what holds beyond this model):\n\n");
+            foreach (Dictionary<string, object> n in mine)
+            {
+                string k = Json.Str(n, "kind");
+                md.Append("- **").Append(char.ToUpperInvariant(k[0]) + k.Substring(1)).Append("**: ").Append(Json.Str(n, "text"));
+                if (Json.Str(n, "basis") != null) md.Append(" \u2014 _basis: ").Append(Json.Str(n, "basis")).Append('_');
+                md.Append('\n');
+            }
+            md.Append('\n');
+        }
+
+        md.Append("## Models\n\n");
+        string record = sessionDir == null ? null : SessionId(sessionDir);
+        bool recordExists = record != null && File.Exists(Path.Combine(notesDir, "Records", record + ".md"));
+        md.Append("- ").Append(original != null ? "`" + original + "`" : "").Append(recordExists ? " \u2014 design record [[" + record + "]]" : "").Append('\n');
+        md.Append('\n');
+
+        md.Append("## Governing checks\n\n| Check | Governing case | Demand | Capacity | Ratio | Record |\n|---|---|---|---|---|---|\n|  |  |  |  |  |  |\n\n");
+        md.Append("## Design records\n\n```base\nfilters:\n  and:\n    - 'type == \"design-record\"'\n    - 'file.hasLink(this.file)'\nviews:\n")
+          .Append("  - type: table\n    name: Records for this element\n    order:\n      - file.name\n      - model\n      - date\n      - author\n      - status\n```\n");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(file));
+        File.WriteAllText(file, md.ToString().Replace("\n", "\r\n"), new UTF8Encoding(false));
+        return Json.O("file", file, "element", element, "model", original, "group", group == null ? null : Json.Str(group, "group"),
+            "loadPatterns", pats.Count, "combos", combos.Count, "notes", mine.Count, "record", recordExists ? record : null,
+            "note", "a draft: the engineer completes it by hand (criteria, load values and basis, governing checks); Pluto never overwrites it." +
+                (recordExists || record == null ? "" : " write_design_record with elements [\"" + element + "\"] links this session's record to it."));
+    }
+
+    static string Xyz(object v)
+    {
+        System.Collections.IEnumerable seq = v as System.Collections.IEnumerable;
+        if (seq == null) return "?";
+        List<string> p = new List<string>();
+        foreach (object o in seq) p.Add(N(o));
+        return "(" + string.Join(", ", p.ToArray()) + ")";
+    }
+
     // ---------------------------------------------------------------- model basis
 
     static void Basis(StringBuilder md, Dictionary<string, object> b, string from)

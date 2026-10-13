@@ -390,6 +390,29 @@ public class SapRead
     }
 
     // Members of a group by kind ("joint", "frame", "area", "link"), in assignment order.
+    // A group's objects for a basis-of-design note: per kind the count, properties used and extent, and the supports
+    // among the group's joints and the joints of its objects.
+    public Dictionary<string, object> GroupSummary(string group)
+    {
+        if (!GroupExists(group)) throw new ArgumentException("no group '" + group + "'");
+        Index x = Objects();
+        Dictionary<string, List<string>> sel = new Dictionary<string, List<string>>();
+        foreach (string k in Kinds) sel[k] = GroupMembers(group, k);
+        HashSet<string> joints = new HashSet<string>(sel["joint"]);
+        foreach (string k in new[] { "frame", "area", "link" }) foreach (string n in sel[k]) foreach (string p in x.PointsOf(k, n)) joints.Add(p);
+        Dictionary<string, int> byRestraint = new Dictionary<string, int>();
+        foreach (string p in joints)
+        {
+            bool[] rr = new bool[6];
+            M.PointObj.GetRestraint(p, ref rr);
+            string k = Flags(rr, GlobalDof);
+            if (k != "-") Bump(byRestraint, k);
+        }
+        Dictionary<string, object> r = O("group", group, "objects", SelectionSummary(sel));
+        r["supports"] = O("restrainedJoints", Sum(byRestraint), "byRestraint", byRestraint);
+        return r;
+    }
+
     public List<string> GroupMembers(string group, string kind)
     {
         int m = 0; int[] types = null; string[] objs = null;

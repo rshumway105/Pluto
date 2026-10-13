@@ -1,6 +1,6 @@
 ---
 title: Design records and basis-of-design map — plan
-status: draft
+status: current
 created: 2026-10-13
 ---
 
@@ -66,11 +66,11 @@ synced folder, Obsidian Sync or git) vs the personal Notes vault.
 > edits one. Sections: description, design criteria (codes, limits), loads, conditions and
 > assumptions that hold for the element, models, governing checks. Its design records show as
 > backlinks. A project-level **Bases** view (template `design-records.base`) tables every record
-> and note with its element, topic and status. Later: `draft_bod_element` prefills loads and
-> model facts from the model.
+> and note with its element, topic and status. `draft_bod_element` drafts a new element note
+> from the model (once; then it is the engineer's).
 
 > [!info]- 4. Hand-check fixtures (tool verification)
-> Promote the 2026-10-12 scratch fixtures into `scripts/mcp/fixtures/` with a `-Fixtures`
+> The 2026-10-12 scratch fixtures, now `scripts/sap/SapFixtures.cs` (MCP `self_test fixtures`), with a `-Fixtures`
 > switch on `Test-PlutoMcp.ps1` (own SAP2000): plate (weight × 2, E × 2), area loads, response
 > spectrum (one-mass cantilever), linear modal time history. Each run writes `fixtures.json`
 > (program version, date, per check: hand, program, tolerance, pass).
@@ -81,7 +81,11 @@ synced folder, Obsidian Sync or git) vs the personal Notes vault.
 > 3. ~~`write_design_record` + templates~~ — built 2026-10-13, server 0.10.0: `DesignRecord.cs`; templates in
 >    `vault/_meta/templates/` (`bod-element.md`, `design-records.base`). Tested in `-Edit` (content, rewrite keeps hand
 >    text and properties) and on the one-mass cantilever into a sandbox vault. The `file.hasLink(this.file)` filter in
->    the element template's embedded base is not yet checked in Obsidian.
+>    the element template's embedded base works in Obsidian (the user checked the register and the element's table).
 > 4. ~~Fixtures into the repo + `fixtures.json`~~ — built 2026-10-13, server 0.11.0: `scripts/sap/SapFixtures.cs`, run
 >    by `self_test` with `fixtures: true` (an own SAP2000) and `Test-PlutoMcp.ps1 -Fixtures`; 10 of 10 pass on SAP2000 26.3.
-> 5. Usage lines in [[vault/arms/pluto-mcp|pluto-mcp]]; this note → `current`.
+> 5. ~~Usage lines; `draft_bod_element`~~ — built 2026-10-13, server 0.12.0: drafts `Elements\<element>.md` from the
+>    model (group objects, sections, extent, supports; load patterns; combinations; the element's logged assumptions and
+>    conditions; the model and its record), never overwrites. Usage: [[vault/arms/pluto-mcp|pluto-mcp]].
+>
+> **Open:** where real records live for a team (shared vault); the user finds the record longer than needed — trim later.

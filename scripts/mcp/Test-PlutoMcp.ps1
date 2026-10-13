@@ -283,7 +283,7 @@ try {
         $e = Tool "set_restraint" @{ names = @("1"); fixed_dofs = @("U1", "U2", "U3", "R1", "R2", "R3") }
         Check "an edit after revert starts a new checkpoint (r004), r001 untouched" ($e -and $e.checkpoint -eq "r004")
         # design notes: the why beside the edits
-        $n1 = Tool "log_note" @{ kind = "assumption"; topic = "supports"; text = "Left support fixed: the beam is cast into the wall."; basis = "engineering judgement"; names = @("1") }
+        $n1 = Tool "log_note" @{ kind = "assumption"; topic = "supports"; text = "Left support fixed: the beam is cast into the wall."; basis = "engineering judgement"; names = @("1"); elements = @("BEAM-A") }
         Check "log_note: n001 on r004" ($n1 -and $n1.logged.id -eq "n001" -and $n1.logged.checkpoint -eq "r004" -and $n1.logged.kind -eq "assumption")
         $n2 = Tool "log_note" @{ kind = "question"; topic = "loads"; text = "Is PT a live or a dead load?" }
         $n3 = Tool "log_note" @{ kind = "decision"; topic = "loads"; text = "PT is live (occupancy)."; basis = "supplied data"; supersedes = "n002" }
@@ -304,6 +304,12 @@ try {
             $dr2 = Tool "write_design_record" @{ notes_dir = $nd }
             $txt2 = [IO.File]::ReadAllText($dr2.file)
             Check "write_design_record again: hand text, status, purpose and elements kept" ($txt2 -like "*Checked by hand.*" -and $txt2 -like '*status: "reviewed"*' -and $txt2 -like "*Beam edit test.*" -and $txt2.Contains("[[BEAM-A]]"))
+            $be = Tool "draft_bod_element" @{ element = "BEAM-A"; group = "ALL"; notes_dir = $nd }
+            $btx = if ($be -and (Test-Path $be.file)) { [IO.File]::ReadAllText($be.file) } else { "" }
+            $bok = ($be -and $btx.Contains("group **ALL**") -and $btx -like "*2 frames (BEAM*" -and $btx -like "*restrained joints*" -and $btx -like "*| PT | Live*" -and $btx -like "*Left support fixed*" -and $btx.Contains("[[" + $dr.session + "]]"))
+            if (-not $bok) { Write-Output $btx }
+            Check "draft_bod_element: group objects and supports, patterns (r004: reverted before C1), the element's note, its record" $bok
+            $null = Tool "draft_bod_element" @{ element = "BEAM-A"; notes_dir = $nd } -ExpectError
         } finally { Remove-Item -Recurse -Force $nd -ErrorAction SilentlyContinue }
     }
     if ($Tables) {

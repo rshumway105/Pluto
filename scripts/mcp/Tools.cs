@@ -566,6 +566,17 @@ public sealed class ToolSet
                 "session_dir", Prop("string", "Another session's folder (default: the current model's).")),
             WriteDesignRecord);
 
+        Add("draft_bod_element", "Drafts a basis-of-design element note, <notes dir>\\Elements\\<element>.md (notes dir: notes_dir, else " +
+            "PLUTO_NOTES_DIR), from the model SAP2000 holds: the group's objects, sections, extent and supports (group), the load " +
+            "patterns and combinations, the assumptions and conditions logged for this element (log_note elements), the model and " +
+            "its design record. The engineer completes it by hand (criteria, load values and basis, governing checks); it is never " +
+            "overwritten. Does not change the model.",
+            Schema(new[] { "element" }, "element", Prop("string", "The design element's name, also the note's name (e.g. TANK-A)."),
+                "group", Prop("string", "SAP2000 group holding the element's objects."),
+                "notes_dir", Prop("string", "The Obsidian vault folder (default PLUTO_NOTES_DIR)."),
+                "session_dir", Prop("string", "Session whose notes and record to use (default: the current model's, when it is one).")),
+            DraftBodElement);
+
         // Every edit (the tools with dry_run) takes an optional reason, kept in changes.jsonl for the design record.
         foreach (Tool t in tools)
         {
@@ -1752,6 +1763,27 @@ public sealed class ToolSet
         DesignRecord.Args ra = new DesignRecord.Args();
         ra.Title = Json.Str(a, "title"); ra.Purpose = Json.Str(a, "purpose"); ra.Author = Json.Str(a, "author"); ra.Elements = Json.Strs(a, "elements");
         return DesignRecord.Write(dir, notesDir, basis, from, Path.Combine(ctx.WorkDir, "fixtures.json"), ra);
+    }
+
+    object DraftBodElement(Dictionary<string, object> a)
+    {
+        string element = (Json.Str(a, "element") ?? "").Trim();
+        if (element.Length == 0) throw new ToolError("element is required");
+        string notesDir = Json.Str(a, "notes_dir") ?? Environment.GetEnvironmentVariable("PLUTO_NOTES_DIR");
+        if (string.IsNullOrEmpty(notesDir)) throw new ToolError("no notes dir: pass notes_dir or set PLUTO_NOTES_DIR (the Obsidian vault folder)");
+        string group = Json.Str(a, "group");
+        string[] read = ctx.Sap.Read("draft_bod_element", delegate(SapRead r)
+        {
+            string g;
+            try { g = group == null ? null : Json.Write(r.GroupSummary(group)); }
+            catch (ArgumentException e) { throw new ToolError(e.Message); }
+            return new[] { Json.Write(r.Basis(SapRead.DefaultLimit)), g, r.ModelPath() };
+        });
+        string dir = Json.Str(a, "session_dir");
+        if (dir != null) { if (!File.Exists(Path.Combine(dir, "session.json"))) throw new ToolError("no Pluto session in " + dir); }
+        else dir = SapDriver.SessionDirOf(read[2]);
+        return DesignRecord.DraftElement(element, notesDir, Json.Parse(read[0]) as Dictionary<string, object>,
+            read[1] == null ? null : Json.Parse(read[1]) as Dictionary<string, object>, dir);
     }
 
     static List<Dictionary<string, object>> NoteLines(string dir)
