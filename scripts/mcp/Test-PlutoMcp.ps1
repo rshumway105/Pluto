@@ -7,10 +7,11 @@
 # them. -Edit (with -SelfTest) edits the beam through the phase 3 tools, runs it and checks hand values, checkpoints,
 # revert and the change log. -Viewer (with -Model -Run) drives the live viewer in a headless Edge through the viewer
 # tools. -Tables (with -SelfTest) exports beam tables to Excel, edits the workbook in Excel and imports it back.
+# -Fixtures runs the hand-check fixtures (self_test fixtures, always its own SAP2000) and writes <work dir>\fixtures.json.
 # -Isolated: the server starts its own SAP2000 (PLUTO_SAP_INSTANCE=new) and closes it, so the user's is not touched.
 # Replies are printed cut to -Show characters.
-#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-Isolated] [-SelfTest [-Edit] [-Tables]] [-Model <sdb|s2k> [-Run [-Viewer]]] [-Show 600]
-param([switch]$Direct, [switch]$Isolated, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [switch]$Viewer, [switch]$Tables, [int]$Show = 600)
+#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-Isolated] [-SelfTest [-Edit] [-Tables]] [-Fixtures] [-Model <sdb|s2k> [-Run [-Viewer]]] [-Show 600]
+param([switch]$Direct, [switch]$Isolated, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [switch]$Viewer, [switch]$Tables, [switch]$Fixtures, [int]$Show = 600)
 $ErrorActionPreference = "Stop"
 $psi = New-Object Diagnostics.ProcessStartInfo
 if ($Direct) {
@@ -83,6 +84,14 @@ try {
         Write-Output "        $text"
         Check "self_test: passed" ((-not $r.result.isError) -and ($text | ConvertFrom-Json).passed -eq $true)
         if (-not $r.result.isError) { $beam = ($text | ConvertFrom-Json).model }
+    }
+    if ($Fixtures) {
+        # the hand-check fixtures (own SAP2000); also refreshes <work dir>\fixtures.json, the design records' tool verification
+        $r = Call 7 "tools/call" @{ name = "self_test"; arguments = @{ fixtures = $true } } 1800
+        $fx = if ($r.result.isError) { $null } else { $r.result.content[0].text | ConvertFrom-Json }
+        if ($r.result.isError) { Write-Output ("        " + $r.result.content[0].text) }
+        foreach ($c in @($fx.checks)) { Check ("fixture " + $c.name + ": hand " + $c.hand + ", SAP2000 " + $c.program) ([bool]$c.pass) }
+        Check "fixtures: 10 checks, all pass, fixtures.json written" ($fx -and $fx.passed -and @($fx.checks).Count -eq 10 -and (Test-Path $fx.file))
     }
 
     $script:id = 10

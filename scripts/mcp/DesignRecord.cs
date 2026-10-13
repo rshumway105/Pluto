@@ -411,9 +411,10 @@ public static class DesignRecord
         List<Dictionary<string, object>> checks = Rows(f, "checks");
         int pass = checks.FindAll(delegate(Dictionary<string, object> c) { return Json.Bool(c, "pass", false); }).Count;
         md.Append("Hand-check fixtures, SAP2000 ").Append(Json.Str(f, "version")).Append(", ").Append(When(Json.Str(f, "utc"))).Append(" UTC: **")
-          .Append(pass).Append(" of ").Append(checks.Count).Append(" pass**.\n\n| Check | Hand | SAP2000 | Pass |\n|---|---|---|---|\n");
+          .Append(pass).Append(" of ").Append(checks.Count).Append(" pass** (relative tolerance ").Append(N(f.ContainsKey("checks") && checks.Count > 0 ? checks[0]["tolerance"] : null))
+          .Append(", units ").Append(Json.Str(f, "units")).Append(").\n\n| Check | Hand value | Hand | SAP2000 | Pass |\n|---|---|---|---|---|\n");
         foreach (Dictionary<string, object> c in checks)
-            md.Append("| ").Append(Cell(Json.Str(c, "name"))).Append(" | ").Append(N(c.ContainsKey("hand") ? c["hand"] : null)).Append(" | ")
+            md.Append("| ").Append(Cell(Json.Str(c, "name"))).Append(" | ").Append(Cell(Json.Str(c, "what") ?? "")).Append(" | ").Append(N(c.ContainsKey("hand") ? c["hand"] : null)).Append(" | ")
               .Append(N(c.ContainsKey("program") ? c["program"] : null)).Append(" | ").Append(Json.Bool(c, "pass", false) ? "yes" : "**no**").Append(" |\n");
         md.Append('\n');
         if (pass < checks.Count) open.Add("Tool verification: " + (checks.Count - pass) + " hand-check fixture(s) fail.");

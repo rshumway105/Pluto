@@ -33,9 +33,13 @@ public sealed class ToolSet
         Add("self_test",
             "Install check: builds a 20 ft simply supported beam with 10 kip at midspan, runs it in SAP2000 and " +
             "checks max |V2| = 5 kip and max |M3| = 50 kip-ft. By default in a second SAP2000 instance that is " +
-            "closed afterwards, so the user's open model is untouched. Takes about a minute.",
+            "closed afterwards, so the user's open model is untouched. Takes about a minute. fixtures: the hand-check " +
+            "fixtures instead (a plate: self weight, area loads, material weight and E changed through the edit tools; a " +
+            "one-mass cantilever: period, response spectrum and step time history), always in a second SAP2000; the result " +
+            "is saved as the tool verification design records cite.",
             Schema("use_running_instance", Prop("boolean",
-                "Run in the SAP2000 the user has open instead. This REPLACES the model it holds: only with the user's consent.")),
+                "Run in the SAP2000 the user has open instead. This REPLACES the model it holds: only with the user's consent."),
+                "fixtures", Prop("boolean", "Run the hand-check fixtures (about two minutes).")),
             SelfTest);
 
         // ------------------------------------------------ phase 1: read and understand
@@ -582,6 +586,7 @@ public sealed class ToolSet
     object SelfTest(Dictionary<string, object> a)
     {
         string dir = Path.Combine(ctx.WorkDir, "selftest", DateTime.Now.ToString("yyyyMMdd-HHmmss", Json.Inv));
+        if (Json.Bool(a, "fixtures", false)) return ctx.Sap.Fixtures(dir, Path.Combine(ctx.WorkDir, "fixtures.json"));
         return ctx.Sap.SelfTest(dir, Json.Bool(a, "use_running_instance", false));
     }
 

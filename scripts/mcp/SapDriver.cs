@@ -430,6 +430,32 @@ public sealed class SapDriver : IModelDriver
         });
     }
 
+    // Hand-check fixtures (SapFixtures: plate and one-mass cantilever, built, edited, run and read back through the
+    // tools' code) in a second SAP2000, always: building a model replaces what SAP holds. The result is also written to
+    // file (fixtures.json in the work dir), which write_design_record cites as the tool verification.
+    public Dictionary<string, object> Fixtures(string dir, string file)
+    {
+        return sta.Invoke("self_test fixtures", Long, delegate
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            SapSession s = SapSession.NewInstance(sapExe);
+            try
+            {
+                string version = s.Version();
+                List<Dictionary<string, object>> checks = SapFixtures.Run(s, dir);
+                int failed = checks.FindAll(delegate(Dictionary<string, object> c) { return !(bool)c["pass"]; }).Count;
+                Dictionary<string, object> r = Json.O("passed", failed == 0, "program", "SAP2000", "version", version,
+                    "utc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", Json.Inv), "units", "kip, ft, s",
+                    "checks", checks, "models", dir, "totalSeconds", Math.Round(sw.Elapsed.TotalSeconds, 1));
+                File.WriteAllText(file, Json.Write(r));
+                r["file"] = file;
+                r["instance"] = "new (closed afterwards)";
+                return r;
+            }
+            finally { s.Close(); }
+        });
+    }
+
     // Simply supported 20 ft beam, 10 kip at midspan (SapSession.WriteTestBeamS2k): expects max |V2| = 5 kip,
     // max |M3| = 50 kip-ft. A second SAP2000 by default, closed afterwards; useRunning opens the beam in the
     // attached SAP instead, replacing the model it holds.

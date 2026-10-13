@@ -82,5 +82,6 @@ synced folder, Obsidian Sync or git) vs the personal Notes vault.
 >    `vault/_meta/templates/` (`bod-element.md`, `design-records.base`). Tested in `-Edit` (content, rewrite keeps hand
 >    text and properties) and on the one-mass cantilever into a sandbox vault. The `file.hasLink(this.file)` filter in
 >    the element template's embedded base is not yet checked in Obsidian.
-> 4. Fixtures into the repo + `fixtures.json`.
+> 4. ~~Fixtures into the repo + `fixtures.json`~~ — built 2026-10-13, server 0.11.0: `scripts/sap/SapFixtures.cs`, run
+>    by `self_test` with `fixtures: true` (an own SAP2000) and `Test-PlutoMcp.ps1 -Fixtures`; 10 of 10 pass on SAP2000 26.3.
 > 5. Usage lines in [[vault/arms/pluto-mcp|pluto-mcp]]; this note → `current`.
