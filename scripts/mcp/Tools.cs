@@ -1828,6 +1828,7 @@ public sealed class ToolSet
         {
             List<object> rows = new List<object>();
             bool designed = false;
+            res.FetchCache = new Dictionary<string, List<SapResults.Row>>();   // one read per kind and set of cases
             foreach (DesignRecord.ElementCheck c in checks)
             {
                 Dictionary<string, object> row = Json.O("element", c.Element, "group", c.Group,

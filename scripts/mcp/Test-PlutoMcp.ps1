@@ -9,10 +9,21 @@
 # tools. -Tables (with -SelfTest) exports beam tables to Excel, edits the workbook in Excel and imports it back.
 # -Fixtures runs the hand-check fixtures (self_test fixtures, always its own SAP2000) and writes <work dir>\fixtures.json.
 # -Isolated: the server starts its own SAP2000 (PLUTO_SAP_INSTANCE=new) and closes it, so the user's is not touched.
-# Replies are printed cut to -Show characters.
-#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-Isolated] [-SelfTest [-Edit] [-Tables]] [-Fixtures] [-Model <sdb|s2k> [-Run [-Viewer]]] [-Show 600]
-param([switch]$Direct, [switch]$Isolated, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [switch]$Viewer, [switch]$Tables, [switch]$Fixtures, [int]$Show = 600)
+# Replies are printed cut to -Show characters. When every check passes, the sessions, self-test folders and result
+# files the run created in the work dir are deleted (a viewer run leaves ~80 MB); on a failure, or with -Keep, they stay.
+#   powershell -ExecutionPolicy Bypass -File Test-PlutoMcp.ps1 [-Direct] [-Isolated] [-SelfTest [-Edit] [-Tables]] [-Fixtures] [-Model <sdb|s2k> [-Run [-Viewer]]] [-Keep] [-Show 600]
+param([switch]$Direct, [switch]$Isolated, [switch]$SelfTest, [string]$Model, [switch]$Run, [switch]$Edit, [switch]$Viewer, [switch]$Tables, [switch]$Fixtures, [switch]$Keep, [int]$Show = 600)
 $ErrorActionPreference = "Stop"
+# what the work dir holds before the run, so a passing run can delete what it added (fixtures.json and the logs stay)
+$workRoot = if ($env:PLUTO_WORK) { $env:PLUTO_WORK } else { Join-Path $env:LOCALAPPDATA "Pluto\work" }
+function WorkEntries {
+    $dirs = @("selftest", "results", "tables", "selections") | ForEach-Object { Join-Path $workRoot $_ }
+    $models = Join-Path $workRoot "models"
+    if (Test-Path $models) { $dirs += @(Get-ChildItem -Directory $models | ForEach-Object FullName) }
+    foreach ($d in $dirs) { if (Test-Path $d) { Get-ChildItem $d | ForEach-Object FullName } }
+}
+$workBefore = @{}
+foreach ($e in @(WorkEntries)) { $workBefore[$e] = $true }
 $psi = New-Object Diagnostics.ProcessStartInfo
 if ($Direct) {
     $psi.FileName = Join-Path $PSScriptRoot "bin\PlutoMcp.exe"
@@ -386,4 +397,15 @@ try {
     if ($err) { Write-Output "--- server stderr ---"; Write-Output $err.TrimEnd() }
 }
 Write-Output $(if ($failed) { "$failed check(s) FAILED" } else { "all checks passed" })
+$workNew = @(WorkEntries | Where-Object { -not $workBefore.ContainsKey($_) })
+if ($workNew.Count -and ($failed -or $Keep)) {
+    Write-Output ("kept " + $workNew.Count + " work dir entries from this run under " + $workRoot)
+} elseif ($workNew.Count) {
+    $mb = 0
+    foreach ($e in $workNew) { $mb += (Get-ChildItem -Recurse -File $e -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum }
+    $left = @($workNew | Where-Object { Remove-Item -Recurse -Force $_ -ErrorAction SilentlyContinue; Test-Path $_ })
+    Write-Output ("cleaned up " + ($workNew.Count - $left.Count) + " work dir entries from this run (" + [Math]::Round($mb / 1MB, 1) + " MB)" + $(if ($left.Count) { "; could not delete " + ($left -join ", ") } else { "" }))
+    # a model folder the run created and emptied goes too
+    Get-ChildItem -Directory (Join-Path $workRoot "models") -ErrorAction SilentlyContinue | Where-Object { -not $workBefore.ContainsKey($_.FullName) -and -not (Get-ChildItem $_.FullName) } | Remove-Item -Force
+}
 exit $failed

@@ -197,11 +197,22 @@ public class SapResults
         return r;
     }
 
+    // check_elements sets this so its checks on one kind and set of cases read SAP2000 once; null (the default)
+    // reads every time. Only while the model and its results stay as they are.
+    public Dictionary<string, List<Row>> FetchCache;
+
     // Every row of a kind for the given cases / combos (selected for output here). An API call that finds no
     // results gives no rows.
     public List<Row> Fetch(string kind, IList<string> cases)
     {
         Quantities(kind);
+        string ck = null;
+        if (FetchCache != null)
+        {
+            ck = kind + "|" + (cases == null ? "" : string.Join("|", cases));
+            List<Row> hit;
+            if (FetchCache.TryGetValue(ck, out hit)) return hit;
+        }
         Select(cases);
         List<Row> rows = new List<Row>();
         eItemTypeElm all = eItemTypeElm.GroupElm;
@@ -261,6 +272,7 @@ public class SapResults
                 break;
             }
         }
+        if (ck != null) FetchCache[ck] = rows;
         return rows;
     }
 
